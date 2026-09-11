@@ -1,0 +1,48 @@
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*.swp
+*.swo
+.DS_Store
+
+# Audio and temporary cache & logs
+*.wav
+*.pcm
+*.log
+coach_server.log
+data/logs/*
+!data/logs/.gitkeep
+
+# Sensitive environment configuration
+.env
+.env.local
+
+# Local model weights (Download via `bash scripts/download_models.sh`)
+models/*
+!models/.gitkeep
+
+# Large copyrighted books and user custom uploads
+data/books/*.pdf
+!data/books/.gitkeep
+data/custom_books/*.pdf
+data/custom_books/catalog.json
+!data/custom_books/.gitkeep
+data/custom_pdfs/
+data/custom_docs.json
+
+# Persistent local databases & user runtime states
+data/*.db
+data/*.db-*
+data/model-runtime/*
+!data/model-runtime/.gitkeep
+data/backups/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/

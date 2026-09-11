@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4338ca"/>
+      <stop offset="50%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="micGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e2e8f0"/>
+    </linearGradient>
+    <filter id="dropShadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#0f172a" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- Background Squircle with Shadow -->
+  <rect x="32" y="32" width="448" height="448" rx="108" fill="url(#bgGrad)" filter="url(#dropShadow)"/>
+  
+  <!-- Subtle Top Highlight -->
+  <rect x="32" y="32" width="448" height="224" rx="108" fill="url(#glowGrad)"/>
+
+  <!-- Open Book Base -->
+  <g transform="translate(0, 20)">
+    <!-- Book Left Page -->
+    <path d="M 256 365 C 210 345 150 345 110 360 L 110 260 C 150 245 210 245 256 265 Z" 
+          fill="#ffffff" fill-opacity="0.88"/>
+    <!-- Book Right Page -->
+    <path d="M 256 365 C 302 345 362 345 402 360 L 402 260 C 362 245 302 245 256 265 Z" 
+          fill="#ffffff" fill-opacity="0.96"/>
+    <!-- Center Spine Line -->
+    <line x1="256" y1="262" x2="256" y2="368" stroke="#cbd5e1" stroke-width="4" stroke-linecap="round"/>
+  </g>
+
+  <!-- Headphones Arc -->
+  <path d="M 136 210 A 120 120 0 0 1 376 210" 
+        fill="none" stroke="#ffffff" stroke-width="28" stroke-linecap="round"/>
+
+  <!-- Headphone Left Ear Cup -->
+  <rect x="114" y="196" width="36" height="68" rx="18" fill="#ffffff"/>
+  <!-- Headphone Right Ear Cup -->
+  <rect x="362" y="196" width="36" height="68" rx="18" fill="#ffffff"/>
+
+  <!-- Microphone Center Element -->
+  <g transform="translate(0, -10)">
+    <!-- Capsule Body -->
+    <rect x="232" y="132" width="48" height="88" rx="24" fill="url(#micGrad)"/>
+    <!-- Capsule Grille Ring -->
+    <line x1="234" y1="172" x2="278" y2="172" stroke="#94a3b8" stroke-width="3"/>
+    <!-- U-Shaped Stand -->
+    <path d="M 214 176 C 214 214 298 214 298 176" 
+          fill="none" stroke="#ffffff" stroke-width="12" stroke-linecap="round"/>
+    <!-- Stand Stem -->
+    <line x1="256" y1="214" x2="256" y2="242" stroke="#ffffff" stroke-width="12" stroke-linecap="round"/>
+  </g>
+
+  <!-- Sound Waves (Left & Right) -->
+  <path d="M 76 195 A 36 36 0 0 0 76 225" fill="none" stroke="#38bdf8" stroke-width="10" stroke-linecap="round"/>
+  <path d="M 436 195 A 36 36 0 0 1 436 225" fill="none" stroke="#38bdf8" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- AI Sparkle (Top Right) -->
+  <path d="M 390 85 Q 405 105 425 110 Q 405 115 390 135 Q 385 115 365 110 Q 385 105 390 85 Z" 
+        fill="#facc15"/>
+  <circle cx="432" cy="78" r="6" fill="#fef08a"/>
+</svg>

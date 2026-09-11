@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI English Coach · 本地英语私教</title>
+  <link rel="icon" type="image/png" href="/static/icon.png">
+  <link rel="stylesheet" href="/static/style.css?v=3.0">
+  <script src="/static/marked.min.js"></script>
+</head>
+<body>
+  <div class="app-container">
+    <header class="app-header">
+      <div class="model-controls" aria-label="本地模型控制">
+        <select id="local-model-select" aria-label="选择本地模型">
+          <option value="qwen">Qwen3.8 27B</option>
+          <option value="minicpm">MiniCPM5 2B</option>
+        </select>
+        <button id="local-model-start" class="btn btn-outline" type="button">启动模型</button>
+        <button id="local-model-stop" class="btn btn-quiet" type="button">停止</button>
+        <span id="local-model-status" role="status" aria-live="polite">正在检查模型…</span>
+      </div>
+
+      <!-- 实时学习进度监控条：本页进度、章节进度、全书进度 -->
+      <div class="header-progress-group" id="header-progress-group" aria-label="学习进度统计">
+        <!-- 本页进度 -->
+        <div class="header-progress-item" id="prog-page-item" title="本页进度：第 0 / 0 句 (0%)">
+          <div class="progress-info-row">
+            <span class="progress-label">📄 本页</span>
+            <span class="progress-val" id="prog-page-val">0/0 句</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill fill-page" id="prog-page-fill" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- 章节进度 -->
+        <div class="header-progress-item" id="prog-chapter-item" title="章节进度：第 0 / 0 页 (0%)">
+          <div class="progress-info-row">
+            <span class="progress-label">📑 章节</span>
+            <span class="progress-val" id="prog-chapter-val">0/0 页</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill fill-chapter" id="prog-chapter-fill" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- 全书进度 -->
+        <div class="header-progress-item" id="prog-book-item" title="全书进度：第 0 / 0 页 (0%)">
+          <div class="progress-info-row">
+            <span class="progress-label">📚 全书</span>
+            <span class="progress-val" id="prog-book-val">0/0 页</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill fill-book" id="prog-book-fill" style="width: 0%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="controls-area" aria-label="应用设置与操作">
+        <!-- Gamification HUD: Streak, Level, XP bar, Quests -->
+        <div class="hud-gamification-bar" id="hud-gamification-bar">
+          <div class="hud-streak-pill" id="hud-streak-pill" title="连续学习打卡，每日坚持不断签！">
+            <span class="hud-fire">🔥</span>
+            <span id="hud-streak-val">1</span><span class="hud-unit">天</span>
+          </div>
+          <div class="hud-level-group" id="hud-level-group" title="点击查看段位成长、每日任务与错题歼灭">
+            <span class="hud-level-badge" id="hud-level-badge">Lv.1 萌新启航</span>
+            <div class="hud-xp-track">
+              <div class="hud-xp-fill" id="hud-xp-fill" style="width: 25%;"></div>
+            </div>
+            <span class="hud-xp-label" id="hud-xp-label">25/100 XP</span>
+          </div>
+          <button id="hud-quest-btn" class="btn btn-xs quest-btn" title="查看每日挑战与错题消灭">
+            🎯 任务 <span id="hud-quest-indicator" class="quest-indicator">(0/3)</span>
+          </button>
+        </div>
+
+        <button id="dual-screen-btn" class="btn btn-outline" title="弹出竖屏教材阅读器，与横屏主窗口实时联动">🖥️ 双屏联动</button>
+        <button id="notes-library-btn" class="btn btn-quiet" title="打开学习笔记库">📚 笔记库</button>
+
+        <!-- 折叠菜单：设置与系统工具 -->
+        <div class="header-menu-container" id="header-menu-container">
+          <button id="header-menu-toggle-btn" class="btn btn-quiet header-menu-toggle-btn" type="button" title="展开应用设置与更多选项" aria-expanded="false" aria-haspopup="true">
+            <span>⚙️ 设置</span>
+            <span class="menu-caret">▾</span>
+          </button>
+          <div class="header-menu-popover" id="header-menu-popover" style="display: none;">
+            <!-- 语音设置 -->
+            <div class="menu-section">
+              <div class="menu-section-title">🔊 语音与朗读</div>
+              <label class="menu-setting-item" for="voice-select">
+                <span class="menu-setting-label">音色</span>
+                <select id="voice-select">
+                  <option value="en-US-JennyNeural" selected>Jenny · 微软纯正美语女声 (Edge-TTS · 极力推荐)</option>
+                  <option value="en-GB-SoniaNeural">Sonia · 微软纯正英语女声 (Edge-TTS · 英音经典)</option>
+                  <option value="zh-CN-XiaoxiaoNeural">晓晓 · 微软中英双语女声 (Edge-TTS · 自然抑扬)</option>
+                  <option value="zh-CN-YunxiNeural">云希 · 微软中英双语男声 (Edge-TTS · 阳光自然)</option>
+                  <option value="af_maple">Maple · 本地离线美音 (Kokoro离线备用)</option>
+                  <option value="bf_vale">Vale · 本地离线英音 (Kokoro离线备用)</option>
+                </select>
+              </label>
+              <label class="menu-setting-item menu-speed-row" for="speed-slider">
+                <span class="menu-setting-label">语速 <strong id="speed-val">1.0x</strong></span>
+                <input type="range" id="speed-slider" min="0.7" max="1.3" step="0.1" value="1.0">
+              </label>
+              <label class="echo-guard-setting" title="防回音抑制门禁：当AI朗读时自动静音麦克风，杜绝音响外放自我打断">
+                <input type="checkbox" id="echo-guard-toggle" checked> 🛡️ 防回音抑制
+              </label>
+            </div>
+
+            <!-- 界面与视图 -->
+            <div class="menu-section">
+              <div class="menu-section-title">🎨 界面与视图</div>
+              <div class="menu-btn-row">
+                <button id="theme-toggle-btn" class="btn btn-quiet theme-toggle-btn" title="切换暗色/亮色外观">
+                  <span id="theme-icon">🌙</span>
+                  <span id="theme-text">深色模式</span>
+                </button>
+                <button id="sidebar-toggle-btn" class="btn btn-quiet" title="收起/展开左侧教材栏 (双屏联动时收起，享受宽屏智能黑板与跟打)">◀ 折叠教材栏</button>
+              </div>
+            </div>
+
+            <!-- 会话与系统 -->
+            <div class="menu-section">
+              <div class="menu-section-title">⚡ 会话与系统</div>
+              <div class="menu-btn-row">
+                <button id="reset-btn" class="btn btn-quiet" title="清除对话记录并开始新会话">新会话</button>
+                <button id="app-exit-btn" class="btn btn-quiet exit-btn" title="完全退出应用并安全关闭后台服务">🛑 退出</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- 三栏左右可拖拽布局 -->
+    <div class="workspace-three-col" id="workspace-container">
+      <button id="expand-sidebar-tab" class="sidebar-expand-tab" style="display: none;" title="展开左侧教材视口与章节导航">📖 展开教材栏 ❯</button>
+      <!-- 左栏：教材视口与章节导航 (上下可拖动) -->
+      <aside class="col-panel col-left" id="col-left" aria-label="教材浏览与导航">
+        <!-- 上子栏：教材高清视口 -->
+        <div class="col-subpanel col-subpanel-top" id="col-left-top">
+          <div class="panel-header-mini">
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span class="eyebrow" style="margin: 0;">VIEWPORT</span>
+              <h3>教材视口</h3>
+            </div>
+            <div class="pdf-zoom-tools">
+              <button id="zoom-in-btn-main" class="mini-btn" title="放大图像">+</button>
+              <button id="zoom-out-btn-main" class="mini-btn" title="缩小图像">-</button>
+              <button id="zoom-fit-btn-main" class="mini-btn" style="width: auto; padding: 0 6px;" title="自适应大小">适应</button>
+              <button id="collapse-col-left-btn" class="mini-btn" style="width: auto; padding: 0 6px;" title="收起教材栏">◀ 收起</button>
+            </div>
+          </div>
+          <div id="pdf-viewport-container" class="lesson-preview pdf-viewport-container">
+            <div id="pdf-page-wrapper" class="pdf-page-wrapper" style="display: none;">
+              <img id="lecture-page-image" class="lecture-page-image" alt="当前教材页预览">
+              <div id="pdf-highlight-layer" class="pdf-highlight-layer"></div>
+            </div>
+            <p id="lecture-page-meta" class="lecture-page-meta">选择教材与单元载入。<br>支持拖拽 PDF 文件至此上传。</p>
+          </div>
+        </div>
+
+        <!-- 垂直拖动条 (左栏上下调整) -->
+        <div class="resizer-v" id="resizer-left-v" title="上下拖动调整教材视口与章节高度"></div>
+
+        <!-- 下子栏：章节选择与导航控制 -->
+        <div class="col-subpanel col-subpanel-bottom" id="col-left-bottom">
+          <div class="lesson-heading-compact">
+            <div>
+              <span class="eyebrow">NAVIGATION</span>
+              <h2 style="margin: 0; font-size: 14px;">教材与单元</h2>
+            </div>
+            <span id="lecture-status" class="lecture-status" aria-live="polite">选择一页教材</span>
+          </div>
+
+          <div class="lesson-fields">
+            <label class="field-label" for="lecture-doc-select">教材</label>
+            <div class="doc-select-row">
+              <select id="lecture-doc-select" aria-label="教材"></select>
+              <button id="import-url-btn" class="btn-upload" title="从网页链接导入英文文章 (支持网页正文一键提取与排版)">🌐 导入文章</button>
+              <button id="upload-doc-btn" class="btn-upload" title="上传自定义PDF教材 (支持点击或拖拽PDF文件)">📁 上传</button>
+              <input type="file" id="doc-file-input" accept=".pdf" style="display:none">
+            </div>
+            <label class="field-label" for="lecture-unit-select">单元</label>
+            <select id="lecture-unit-select" aria-label="单元"><option value="">选择单元</option></select>
+            <div class="page-field">
+              <label class="field-label" for="lecture-page-input">PDF 页码</label>
+              <div class="page-input-row">
+                <input id="lecture-page-input" type="number" min="1" value="1" inputmode="numeric">
+                <button id="lecture-load-btn" class="btn btn-quiet">载入</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="lesson-navigation" aria-label="翻页">
+            <button id="lecture-prev-btn" class="icon-btn" title="上一页 (快捷键: ← 或 PageUp)" aria-label="上一页">←</button>
+            <span class="navigation-label">翻页学习</span>
+            <button id="lecture-next-btn" class="icon-btn" title="下一页 (快捷键: → 或 PageDown)" aria-label="下一页">→</button>
+          </div>
+
+          <div class="lesson-actions">
+            <button id="lecture-explain-btn" class="btn btn-quiet" title="对当前整页进行综合概括梳理">整页串讲</button>
+            <button id="lecture-practice-btn" class="btn btn-outline" title="整页综合互动问答">本页提问</button>
+          </div>
+
+          <button id="lecture-exit-btn" class="text-button">退出教材模式</button>
+        </div>
+      </aside>
+
+      <!-- 水平拖动条 1 (左栏与中栏之间) -->
+      <div class="resizer-h" id="resizer-left-center" title="左右拖动调整左栏与中栏宽度"></div>
+
+      <!-- 中栏：实时口语流 (上) + 逐句精读跟打工作室 (下) (上下可拖动) -->
+      <section class="col-panel col-center" id="col-center" aria-label="精读与口语互动">
+        <!-- 上子栏：实时口语对话流与交互控制 -->
+        <div class="col-subpanel col-subpanel-top" id="col-center-top">
+          <div class="panel-header-mini dialogue-header-bar">
+            <div class="dialogue-header-left">
+              <div class="dialogue-title-tag">
+                <span class="eyebrow" style="margin: 0;">DIALOGUE</span>
+                <h3 style="white-space: nowrap;">实时口语互动</h3>
+              </div>
+              <!-- 紧凑设置区：教学风格 + 练习模式 -->
+              <div class="header-settings-bar">
+                <div class="header-setting-group" title="选择教学风格与导师人设 (一次设置永久保存)">
+                  <span class="header-setting-label">风格:</span>
+                  <select id="teaching-style-select" class="header-setting-select">
+                    <option value="spoken">🗣️ 口语大师</option>
+                    <option value="history">🏛️ 文史精读</option>
+                    <option value="ielts">🎓 雅思学术</option>
+                    <option value="grammar">🧩 句法拆解</option>
+                    <option value="drill">⚡ 刷题速成</option>
+                  </select>
+                </div>
+                <div class="header-setting-group" title="设置单句交互与练习模式 (一次设置永久保存)">
+                  <span class="header-setting-label">模式:</span>
+                  <select id="sentence-action-mode-select" class="header-setting-select">
+                    <option value="explain">📖 双语精讲 (重点单词+句法)</option>
+                    <option value="read_only">🔊 纯读 (仅读音·无任何讲解)</option>
+                    <option value="practice">🎙️ 跟读 (领读+评测)</option>
+                    <option value="continuous_read">🔁 连续整页纯读 (原音连读·磨耳朵)</option>
+                    <option value="continuous_explain">▶️ 连续整页精讲 (自动连讲·重单词)</option>
+                  </select>
+                  <button id="header-action-run-btn" class="header-action-run-btn" title="执行当前模式">▶ 精讲</button>
+                </div>
+              </div>
+            </div>
+            <div id="status-pill" class="status-pill idle" aria-live="polite">准备就绪</div>
+          </div>
+
+          <div id="chat-stream" class="chat-stream" aria-live="polite">
+            <div class="message coach-message welcome-message">
+              <div class="msg-avatar" aria-hidden="true">AI</div>
+              <div class="msg-content">
+                <div class="msg-label">你的双语英语教练</div>
+                <div class="msg-text">你好！按住下方麦克风说英语，或直接提问。中英混杂说也没问题，我会为你提供地道朗读与深度点拨。点击顶部“🖥️ 双屏联动”还可将教材铺满竖屏！</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="interaction-bar">
+            <div class="waveform-container" id="waveform-container" aria-hidden="true"><canvas id="waveform-canvas" width="400" height="18"></canvas></div>
+            <div class="interaction-input-row">
+              <input type="text" id="text-input" placeholder="输入英文、中文，或对当前句子提问… (按 Tab 切换跟打)" autocomplete="off" title="口语互动输入框 (按 Tab 键可切换至下方跟打练习)">
+              <button id="interrupt-btn" class="btn btn-danger" style="display: none;" title="打断AI朗读">⏹ 停止</button>
+              <button id="mic-btn" class="mic-button idle" title="按住说话 (快捷键: 空格键)"><span class="mic-icon">●</span><span class="mic-label">点击或按住说话</span></button>
+              <button id="send-text-btn" class="btn btn-primary">发送</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 垂直拖动条 (中栏上下调整) -->
+        <div class="resizer-v" id="resizer-center-v" title="上下拖动调整实时口语与精讲跟打区高度"></div>
+
+        <!-- 下子栏：逐句精析、对照跟打与发音评测 -->
+        <div class="col-subpanel col-subpanel-bottom" id="col-center-bottom">
+          <div class="studio-scroll-area">
+            <!-- Sentence-by-Sentence Section -->
+            <div class="sentence-focus-card" id="sentence-focus-card">
+              <!-- 全屏沉浸跟打顶部栏 (仅在全屏模式下显示) -->
+              <div class="sentence-fs-header" id="sentence-fs-header">
+                <div class="fs-header-left">
+                  <span class="fs-badge">⌨️ 沉浸跟打模式</span>
+                  <span class="fs-doc-title" id="fs-doc-title">逐句精读与对照跟打</span>
+                </div>
+                <div class="fs-header-right">
+                  <button id="fs-bg-toggle-btn" class="mini-icon-btn fs-bg-toggle-btn" title="切换背景效果：磨砂玻璃 / 深邃纯黑">✨ 磨砂玻璃</button>
+                  <span class="fs-shortcut-hint">快捷键: ←/→ 翻页 · ↑/↓ 翻句 · Esc 退出</span>
+                  <button id="exit-fullscreen-btn" class="mini-icon-btn fs-exit-btn" title="退出全屏 (快捷键: Esc / F10)">✕ 退出全屏</button>
+                </div>
+              </div>
+
+              <div id="sentence-preview-box" class="sentence-preview-box">
+                载入教材后，可在此逐句精读与跟读
+              </div>
+              <!-- 中文翻译显示区 (紧挨英文原句下方) -->
+              <div class="typing-translation-display" id="typing-translation-display" title="参考中文译文 (紧挨英文原句)">
+                <span class="translation-prefix">🇨🇳 译文</span>
+                <span class="translation-text" id="typing-translation-text">载入教材后显示中文释义</span>
+              </div>
+
+              <!-- Shadow Typing Card (对照跟打强化练习区) -->
+              <div class="shadow-typing-card" id="shadow-typing-card">
+                <div class="typing-target-display" id="typing-target-display" tabindex="0" title="跟打练习区 (按 Tab 键可切换至上方口语互动)">
+                  <span class="char-pending">载入教材后开始跟打练习</span>
+                </div>
+                <div class="typing-hint-bar">
+                  <span id="typing-progress-text">进度: 0 / 0 字符</span>
+
+                  <!-- 翻页与翻句子居中导航栏 -->
+                  <div class="typing-nav-group">
+                    <div class="studio-page-badge" id="studio-page-badge" title="当前教材页码 (翻页: ← / →)">
+                      <button id="studio-prev-page-btn" class="nav-mini-btn" title="上一页 (快捷键: ← 或 PageUp)">←</button>
+                      <span id="studio-page-num" class="nav-page-num">P. 1</span>
+                      <button id="studio-next-page-btn" class="nav-mini-btn" title="下一页 (快捷键: → 或 PageDown)">→</button>
+                    </div>
+                    <div class="sentence-stepper" id="sentence-stepper-box" title="当前页句子导航 (翻句: ↑ / ↓)">
+                      <button id="sent-prev-btn" class="nav-mini-btn" title="上一句 (快捷键: ↑)">◀</button>
+                      <span id="sent-progress-label" class="nav-sent-label">第 0 / 0 句</span>
+                      <button id="sent-next-btn" class="nav-mini-btn" title="下一句 (快捷键: ↓)">▶</button>
+                    </div>
+                  </div>
+
+                  <div class="typing-actions-group">
+                    <button id="typing-repeat-btn" class="mini-icon-btn repeat-mode-btn" title="单句跟打遍数模式：需敲打 1 / 2 / 3 遍才过关 (点击切换)">
+                      <span id="typing-repeat-label">1遍</span>
+                    </button>
+                    <button id="typing-word-sound-btn" class="mini-icon-btn active" title="单词发音：每个要打的单词开始时自动朗读英文 (开启中，点击关闭)">🔤</button>
+                    <button id="typing-word-trans-btn" class="mini-icon-btn active" title="单词释义：英文读完后自动朗读简短中文释义 (开启中，点击关闭)"><span class="btn-text-badge">中</span></button>
+                    <button id="typing-sound-btn" class="mini-icon-btn" title="敲击音效开关">🔊</button>
+                    <button id="typing-trans-toggle-btn" class="mini-icon-btn active" title="显示/隐藏参考译文">🇨🇳</button>
+                    <button id="typing-replay-btn" class="mini-icon-btn" title="重听原句发音 (快捷键: Alt+R / Shift+Enter)">🔁</button>
+                    <button id="typing-loop-btn" class="mini-icon-btn" title="单句循环播放 开/关 (快捷键: Alt+L)">🔂</button>
+                    <button id="typing-clear-btn" class="mini-icon-btn" title="清空重打">↺</button>
+                    <button id="typing-fullscreen-btn" class="mini-icon-btn" title="全屏沉浸跟打模式 (快捷键: F10 / Esc 退出)">⛶</button>
+                    <label class="auto-typing-toggle-label" title="开启后，当前句讲解完自动聚焦光标开始跟打">
+                      <input type="checkbox" id="auto-typing-toggle" checked> 自动聚焦
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Pronunciation Evaluation Card (发音评测与单词对齐) -->
+              <div class="pronunciation-card" id="pronunciation-card" style="display: none;">
+                <div class="pron-header">
+                  <div class="pron-title-row">
+                    <span class="pron-card-title">🎙️ 发音评测与对齐得分</span>
+                    <span class="pron-score-badge good" id="pron-score-badge">0分</span>
+                  </div>
+                  <div class="pron-feedback-text" id="pron-feedback-text">正在评估发音...</div>
+                </div>
+                <div class="pron-words-display" id="pron-words-display"></div>
+                <div class="pron-actions">
+                  <button id="pron-retry-btn" class="mini-icon-btn" style="width: auto; padding: 0 10px; font-size: 11px;" title="重新尝试跟读">🔄 再练一次</button>
+                  <button id="pron-listen-btn" class="mini-icon-btn" style="width: auto; padding: 0 10px; font-size: 11px;" title="重听原声朗读">🔊 听原声</button>
+                  <button id="pron-save-mistake-btn" class="mini-icon-btn" style="width: auto; padding: 0 10px; font-size: 11px; color: var(--amber);" title="将本句存入生词错题库">⭐ 记入错题</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 水平拖动条 2 (中栏与右栏之间) -->
+      <div class="resizer-h" id="resizer-center-right" title="左右拖动调整中栏与右栏宽度"></div>
+
+      <!-- 右栏：学习智能板书 (Live Notes) -->
+      <aside class="col-panel col-right" id="col-right" aria-label="学习智能板书">
+        <div class="panel-header-mini" style="min-height: 44px;">
+          <div>
+            <span class="eyebrow" style="margin: 0;">LIVE NOTES</span>
+            <h2 style="margin: 0; font-size: 14px;">学习智能板书</h2>
+          </div>
+          <div class="whiteboard-actions">
+            <button id="save-notes-btn" class="btn btn-xs btn-primary" title="保存当前板书到本地笔记库">💾 收藏</button>
+            <button id="copy-notes-btn" class="btn btn-xs btn-quiet" title="复制Markdown笔记">📋 复制</button>
+            <button id="export-notes-btn" class="btn btn-xs btn-quiet" title="导出所有学习笔记为Markdown文件">📥 导出.md</button>
+          </div>
+        </div>
+        <div id="whiteboard-content" class="whiteboard-content">
+          <div class="empty-state">
+            <div class="empty-icon">✦</div>
+            <h3>你的学习要点会实时出现在这里</h3>
+            <p>逐句语法拆解、词汇短语搭配、地道中文点拨与仿写建议均会实时整理生成。</p>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Web Article Import Modal -->
+  <div id="url-import-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog" style="max-width: 540px;">
+      <div class="modal-header">
+        <h2>🌐 导入网页文章学习</h2>
+        <button id="url-import-close-btn" class="icon-btn" title="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="url-import-form" onsubmit="return false;">
+          <div style="margin-bottom: 12px;">
+            <label class="field-label" for="import-url-input" style="display: block; margin-bottom: 6px; font-weight: 600;">文章网址 (URL)</label>
+            <input type="url" id="import-url-input" class="text-input" placeholder="例如: https://omarchy.org/manual/" style="width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 13px;">
+          </div>
+          <div style="margin-bottom: 12px;">
+            <label class="field-label" for="import-title-input" style="display: block; margin-bottom: 6px; font-weight: 600;">自定义文章标题 (选填)</label>
+            <input type="text" id="import-title-input" class="text-input" placeholder="留空则自动提取网页标题" style="width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 13px;">
+          </div>
+          <div style="margin-bottom: 14px;">
+            <details style="font-size: 12px; color: var(--muted); cursor: pointer;">
+              <summary style="user-select: none; margin-bottom: 6px; outline: none;">📋 或直接在此粘贴文章纯文本 / Markdown (防爬虫备用)</summary>
+              <textarea id="import-raw-text-input" rows="4" placeholder="若网页需要登录或有反爬限制，可直接将英文正文粘贴至此..." style="width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 12px; resize: vertical; line-height: 1.5;"></textarea>
+            </details>
+          </div>
+          <div id="url-import-status" style="margin-bottom: 12px; font-size: 12px; color: var(--blue); min-height: 18px;"></div>
+          <div style="display: flex; justify-content: flex-end; gap: 8px;">
+            <button type="button" id="url-import-cancel-btn" class="btn btn-quiet">取消</button>
+            <button type="submit" id="url-import-submit-btn" class="btn btn-primary" style="background: var(--blue); color: #fff; font-weight: 600;">🚀 开始提取并导入</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notebook Modal -->
+  <div id="notes-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <h2>📚 学习笔记库</h2>
+          <label style="font-size:12px; color:var(--muted); display:inline-flex; align-items:center; gap:5px; cursor:pointer;">
+            <input type="checkbox" id="modal-filter-mistakes"> ⚠️ 仅看错题强化
+          </label>
+        </div>
+        <div class="modal-header-actions">
+          <button id="modal-export-anki-btn" class="btn btn-xs btn-outline" style="border-color:#818cf8; color:#818cf8;" title="导出符合Anki规范的闪卡包，可直接一键导入Anki进行间隔复习">🎓 导出 Anki 闪卡 (.tsv)</button>
+          <button id="modal-export-btn" class="btn btn-xs btn-primary">📥 导出 Markdown</button>
+          <button id="modal-close-btn" class="icon-btn">✕</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="notes-list" id="modal-notes-list">
+          <div style="text-align:center; color:#64748b; padding:30px;">正在加载笔记...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Gamification Quests & Boss Rush Modal -->
+  <div id="game-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <h2>🏆 成长中心 · 每日挑战与错题歼灭</h2>
+        </div>
+        <button id="game-modal-close-btn" class="icon-btn">✕</button>
+      </div>
+      <div class="game-tabs">
+        <button class="game-tab-btn active" data-tab="quests">🎯 每日修炼挑战</button>
+        <button class="game-tab-btn" data-tab="boss">👾 错题歼灭战 (<span id="modal-mistakes-badge">0</span>)</button>
+        <button class="game-tab-btn" data-tab="ranks">👑 等级与段位榜</button>
+      </div>
+      <div class="modal-body">
+        <!-- Tab 1: Quests -->
+        <div id="tab-content-quests" class="game-tab-content">
+          <div class="quest-grid" id="modal-quests-list">
+            <div style="text-align:center; color:#64748b; padding:20px;">加载每日挑战中...</div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Mistake Boss Rush -->
+        <div id="tab-content-boss" class="game-tab-content" style="display: none;">
+          <div style="margin-bottom: 12px; font-size: 12px; color: var(--muted); display:flex; justify-content:space-between; align-items:center;">
+            <span>歼灭发音和跟打中标记的易错句，彻底净化错题！每消灭 1 句奖励 <strong>+35 XP</strong></span>
+            <button id="refresh-boss-btn" class="btn btn-xs btn-quiet">刷新怪群</button>
+          </div>
+          <div class="boss-rush-list" id="modal-boss-list">
+            <div style="text-align:center; color:#64748b; padding:20px;">正在搜寻错题怪兽...</div>
+          </div>
+        </div>
+
+        <!-- Tab 3: Ranks Tree -->
+        <div id="tab-content-ranks" class="game-tab-content" style="display: none;">
+          <div class="rank-tree-list" id="modal-ranks-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <canvas id="confetti-canvas" class="confetti-canvas"></canvas>
+
+  <script src="/static/model-controls.js?v=3.0"></script>
+  <script src="/static/app.js?v=3.0"></script>
+</body>
+</html>
