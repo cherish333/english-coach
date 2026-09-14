@@ -73,7 +73,7 @@ const syncChannel = new BroadcastChannel("english_coach_sync");
 
 let lectureDocumentId = null;
 let lecturePage = 1;
-let lectureTotalPages = 1;
+let lectureTotalPages = 0;
 let lecturePageRequestId = 0;
 let lectureUnits = [];
 let lectureSentences = [];
@@ -322,7 +322,13 @@ function handleServerMessage(data) {
       break;
 
     case "status":
-      if (data.text.includes("Listening")) setStatus(data.text, "listening");
+      if (data.text.includes("Listening")) {
+        if (!isCurrentTurnComplete && (statusPill.textContent.includes("Coach is thinking") || statusPill.classList.contains("speaking")) && (data.turn_id === undefined || data.turn_id === null)) {
+          break;
+        }
+        isCurrentTurnComplete = true;
+        setStatus(data.text, "listening");
+      }
       else if (data.text.includes("thinking") || data.text.includes("Transcribing")) setStatus(data.text, "thinking");
       else setStatus(data.text, "idle");
       break;
@@ -411,6 +417,7 @@ function handleServerMessage(data) {
 
     case "error":
       console.error("Server error:", data.message);
+      isCurrentTurnComplete = true;
       setStatus("错误：" + data.message, "idle");
       break;
   }
@@ -559,7 +566,9 @@ function playNoteWordAudio(word, btnEl = null) {
 
 const VOCAB_EXCLUDE_WORDS = new Set([
   "sentence text", "term", "word", "phrase", "word/phrase", "word 1", "word 2",
-  "key vocabulary", "syntax structure", "sentence", "translation"
+  "key vocabulary", "syntax structure", "sentence", "translation",
+  "core skeleton", "syntax hierarchy tree", "syntax tree", "sense groups", "reading flow",
+  "reading flow / sense groups", "key knowledge point"
 ]);
 
 function enhanceWhiteboardVocab(container) {
@@ -946,6 +955,7 @@ let typedBuffer = "";
 let currentTypingRepeatRounds = parseInt(localStorage.getItem("ai_coach_typing_repeats") || "1", 10);
 if (![1, 2, 3].includes(currentTypingRepeatRounds)) currentTypingRepeatRounds = 1;
 let currentTypingRound = 1;
+const completedWordIndicesInCurrentRound = new Set();
 
 function updateTypingRepeatButton() {
   const btn = document.getElementById("typing-repeat-btn");
@@ -1531,6 +1541,10 @@ function setupShadowTyping(targetText, translation = null) {
   typingStartTime = null;
   lastTypedLength = 0;
   typedBuffer = "";
+  completedWordIndicesInCurrentRound.clear();
+  if (window.OdometerEngine) {
+    window.OdometerEngine.updateDisplays(false);
+  }
 
   currentWordAudioSessionId++;
   if (wordAudioEl) { try { wordAudioEl.pause(); wordAudioEl.currentTime = 0; } catch (_) {} }
@@ -1685,6 +1699,30 @@ function handleTypingInput() {
   }
   lastTypedLength = typed.length;
 
+  // Odometer word tracking: detect each completed word and update odometer
+  if (currentSentenceWords && currentSentenceWords.length > 0) {
+    for (let i = 0; i < currentSentenceWords.length; i++) {
+      if (!completedWordIndicesInCurrentRound.has(i)) {
+        const word = currentSentenceWords[i];
+        if (typed.length >= word.endIndex) {
+          let allCorrect = true;
+          for (let k = word.startIndex; k < word.endIndex; k++) {
+            if (!areTypingCharsEqual(typed[k], currentTypingTarget[k])) {
+              allCorrect = false;
+              break;
+            }
+          }
+          if (allCorrect) {
+            completedWordIndicesInCurrentRound.add(i);
+            if (window.OdometerEngine) {
+              window.OdometerEngine.recordWord(word.clean);
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Update Combo Badge
   if (comboBadge) {
     comboBadge.textContent = `Combo x${currentTypingCombo} 🔥`;
@@ -1750,6 +1788,7 @@ function handleTypingInput() {
       typedBuffer = "";
       lastTypedLength = 0;
       lastSpokenWordIndex = -1;
+      completedWordIndicesInCurrentRound.clear();
       display.innerHTML = currentTypingTarget
         .split("")
         .map((ch, idx) => `<span class="${idx === 0 ? 'char-current' : 'char-pending'}" data-idx="${idx}">${escapeHtml(ch)}</span>`)
@@ -1773,12 +1812,18 @@ function handleTypingInput() {
     }
     showToast(currentTypingRepeatRounds > 1 ? `🎉 太棒了！连续 ${currentTypingRepeatRounds} 遍跟打 100% 正确！` : "🎉 太棒了！本句跟打拼写 100% 正确！");
 
+    // Flush any pending words in OdometerEngine immediately
+    if (window.OdometerEngine) {
+      window.OdometerEngine.flush();
+    }
+
     // Record action in Gamification Engine
     const wordCount = currentTypingTarget.split(/\s+/).filter(Boolean).length;
     if (window.recordGameAction) {
       window.recordGameAction("typing_completed", {
         words_count: wordCount * currentTypingRepeatRounds,
-        combo: maxTypingComboInSentence
+        combo: maxTypingComboInSentence,
+        increment_words: false
       }, card);
     }
 
@@ -1812,7 +1857,7 @@ function checkContinuousAdvance() {
   const autoTypingToggle = document.getElementById("auto-typing-toggle");
   const autoTyping = autoTypingToggle ? autoTypingToggle.checked : true;
 
-  if (autoTyping) {
+  if (!isContinuousLecture && autoTyping) {
     const typingDisplay = document.getElementById("typing-target-display");
     if (typingDisplay && currentTypingTarget && !isTypingCompleted) {
       typingDisplay.focus();
@@ -2050,6 +2095,7 @@ function stopRecording() {
   const waveContainer = document.getElementById("waveform-container");
   if (waveContainer) waveContainer.classList.remove("active");
   setStatus("Processing speech...", "thinking");
+  isCurrentTurnComplete = false;
   clearWaveform();
 }
 
@@ -2328,8 +2374,8 @@ async function loadLectureDocuments() {
     if (selectedDoc) {
       lectureDocumentId = selectedDoc.id;
       lectureDocSelect.value = selectedDoc.id;
-      lectureTotalPages = selectedDoc.pages || 1;
-      lecturePageInput.max = lectureTotalPages;
+      lectureTotalPages = selectedDoc.pages || 0;
+      lecturePageInput.max = lectureTotalPages || "";
       await loadLectureUnits(selectedDoc.id);
 
       // 4. Restore exact page and sentence for this document
@@ -2400,7 +2446,11 @@ async function loadLectureUnits(documentId) {
 async function loadLecturePage(requestedPage, targetSentenceIndex = null) {
   const documentId = lectureDocSelect.value || lectureDocumentId;
   if (!documentId) return;
-  const page = Math.max(1, Math.min(Number(requestedPage) || 1, lectureTotalPages || 99999));
+  if (lectureDocumentId && documentId !== lectureDocumentId) {
+    lectureTotalPages = 0;
+  }
+  const maxPage = lectureTotalPages > 0 ? lectureTotalPages : 99999;
+  const page = Math.max(1, Math.min(Number(requestedPage) || 1, maxPage));
   const requestId = ++lecturePageRequestId;
   if (targetSentenceIndex !== null) {
     pendingTargetSentenceIndex = Number(targetSentenceIndex);
@@ -2994,6 +3044,10 @@ syncChannel.onmessage = (event) => {
   } else if (type === "game_status_updated") {
     if (data) {
       updateHudDisplays(data);
+    }
+  } else if (type === "odometer_updated") {
+    if (window.OdometerEngine && data) {
+      window.OdometerEngine.setLifetimeWords(data.total_words, data.today_words, data.unique_words);
     }
   } else if (type === "sentence_translation") {
     // Another window fetched a translation - cache it locally and update UI if relevant
@@ -4224,6 +4278,7 @@ lectureDocSelect.addEventListener("change", async () => {
 
   lecturePage = targetPage;
   lecturePageInput.value = targetPage;
+  lectureTotalPages = 0;
   await loadLectureUnits(docId);
   const currentUnit = [...lectureUnits].reverse().find(unit => unit.page <= targetPage);
   lectureUnitSelect.value = currentUnit ? String(currentUnit.page) : "";
@@ -4536,6 +4591,190 @@ function setupMainImageViewer() {
 }
 
 // ==========================================================================
+// Automotive Odometer Engine (汽车仪表盘总里程表引擎)
+// Tracks every single typed word, persists to SQLite, provides rolling drum visual
+// ==========================================================================
+
+const OdometerEngine = {
+  totalWords: 0,
+  todayWords: 0,
+  uniqueWords: 0,
+  pendingWords: [],
+  flushTimer: null,
+  isFlushing: false,
+
+  init(stats) {
+    if (stats && stats.words_typed !== undefined) {
+      this.totalWords = Number(stats.words_typed) || 0;
+      this.todayWords = Number(stats.today_words) || 0;
+      this.uniqueWords = Number(stats.unique_words) || 0;
+    }
+    this.updateDisplays(false);
+  },
+
+  setLifetimeWords(total, today, unique) {
+    if (total !== undefined && total !== null) {
+      const num = Number(total);
+      if (!isNaN(num) && num >= this.totalWords) {
+        this.totalWords = num;
+      }
+    }
+    if (today !== undefined && today !== null) {
+      const numToday = Number(today);
+      if (!isNaN(numToday) && numToday >= this.todayWords) {
+        this.todayWords = numToday;
+      }
+    }
+    if (unique !== undefined && unique !== null) {
+      const numUnique = Number(unique);
+      if (!isNaN(numUnique)) {
+        this.uniqueWords = numUnique;
+      }
+    }
+    this.updateDisplays(false);
+  },
+
+  recordWord(cleanWord) {
+    if (!cleanWord || typeof cleanWord !== "string") return;
+    const trimmed = cleanWord.trim();
+    if (!trimmed) return;
+
+    // 1. Instant local increment & visual tick animation
+    this.totalWords++;
+    this.todayWords++;
+    this.updateDisplays(true);
+
+    // 2. Queue for persistence
+    const docId = typeof currentDocumentId !== "undefined" ? currentDocumentId : null;
+    const sentIdx = typeof currentSentenceIndex !== "undefined" ? currentSentenceIndex : null;
+    this.pendingWords.push({ word: trimmed, docId, sentIdx });
+
+    // 3. Debounced flush or immediate if batch size reached
+    if (this.pendingWords.length >= 5) {
+      this.flush();
+    } else {
+      if (this.flushTimer) clearTimeout(this.flushTimer);
+      this.flushTimer = setTimeout(() => this.flush(), 800);
+    }
+  },
+
+  async flush() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.pendingWords.length === 0 || this.isFlushing) return;
+
+    const batch = [...this.pendingWords];
+    this.pendingWords = [];
+    this.isFlushing = true;
+
+    try {
+      const wordsList = batch.map(b => b.word);
+      const first = batch[0];
+      const res = await fetch("/api/game/odometer/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          words: wordsList,
+          document_id: first ? first.docId : null,
+          sentence_index: first ? first.sentIdx : null
+        })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.total_words !== undefined) {
+          if (data.total_words > this.totalWords) {
+            this.totalWords = data.total_words;
+          }
+          if (data.today_words !== undefined && data.today_words > this.todayWords) {
+            this.todayWords = data.today_words;
+          }
+          if (data.unique_words !== undefined) {
+            this.uniqueWords = data.unique_words;
+          }
+          this.updateDisplays(false);
+          try {
+            syncChannel.postMessage({
+              type: "odometer_updated",
+              data: {
+                total_words: this.totalWords,
+                today_words: this.todayWords,
+                unique_words: this.uniqueWords
+              }
+            });
+          } catch (_) {}
+        }
+      } else {
+        this.pendingWords = batch.concat(this.pendingWords);
+      }
+    } catch (err) {
+      console.warn("Failed to flush odometer words:", err);
+      this.pendingWords = batch.concat(this.pendingWords);
+    } finally {
+      this.isFlushing = false;
+    }
+  },
+
+  updateDisplays(triggerTick = false) {
+    const formatted = this.totalWords.toLocaleString("en-US");
+
+    // 1. Top HUD bar
+    const hudVal = document.getElementById("hud-odometer-val");
+    if (hudVal) {
+      hudVal.textContent = formatted;
+      if (triggerTick) {
+        hudVal.classList.remove("tick");
+        void hudVal.offsetWidth;
+        hudVal.classList.add("tick");
+        setTimeout(() => hudVal.classList.remove("tick"), 200);
+      }
+    }
+
+    const hudPill = document.getElementById("hud-odometer-pill");
+    if (hudPill) {
+      hudPill.title = `汽车仪表盘总里程: 生涯累计 ${formatted} 词 | 今日: ${this.todayWords.toLocaleString("en-US")} 词 (点击查看总里程看板)`;
+    }
+
+    // 2. Typing card header
+    const typingVal = document.getElementById("typing-odometer-val");
+    if (typingVal) {
+      typingVal.textContent = formatted;
+      if (triggerTick) {
+        typingVal.classList.remove("tick");
+        void typingVal.offsetWidth;
+        typingVal.classList.add("tick");
+        setTimeout(() => typingVal.classList.remove("tick"), 200);
+      }
+    }
+
+    // 3. Fullscreen mode
+    const fsVal = document.getElementById("fs-odometer-val");
+    if (fsVal) {
+      fsVal.textContent = formatted;
+      if (triggerTick) {
+        fsVal.classList.remove("tick");
+        void fsVal.offsetWidth;
+        fsVal.classList.add("tick");
+        setTimeout(() => fsVal.classList.remove("tick"), 200);
+      }
+    }
+  }
+};
+window.OdometerEngine = OdometerEngine;
+
+window.addEventListener("beforeunload", () => {
+  if (OdometerEngine.pendingWords.length > 0) {
+    const wordsList = OdometerEngine.pendingWords.map(b => b.word);
+    const payload = JSON.stringify({ words: wordsList });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon("/api/game/odometer/record", new Blob([payload], { type: "application/json" }));
+    }
+  }
+});
+
+// ==========================================================================
 // Gamification Engine (XP, Streak, Daily Quests, Boss Rush, Ranks)
 // ==========================================================================
 
@@ -4564,6 +4803,10 @@ function updateHudDisplays(data) {
 
   if (mistakesBadge) {
     mistakesBadge.textContent = data.mistakes_count || 0;
+  }
+
+  if (data.words_typed !== undefined && window.OdometerEngine) {
+    window.OdometerEngine.setLifetimeWords(data.words_typed, data.today_words, data.unique_words);
   }
 }
 
@@ -4644,6 +4887,14 @@ function initGamificationModal() {
   if (levelGroup) levelGroup.addEventListener("click", () => openModal("ranks"));
   if (refreshBossBtn) refreshBossBtn.addEventListener("click", loadMistakesRushList);
 
+  const odometerHudBtn = document.getElementById("hud-odometer-pill");
+  const odometerTypingBtn = document.getElementById("typing-odometer-pill");
+  const odometerFsBtn = document.getElementById("fs-odometer-pill");
+
+  if (odometerHudBtn) odometerHudBtn.addEventListener("click", () => openModal("odometer"));
+  if (odometerTypingBtn) odometerTypingBtn.addEventListener("click", () => openModal("odometer"));
+  if (odometerFsBtn) odometerFsBtn.addEventListener("click", () => openModal("odometer"));
+
   document.querySelectorAll(".game-tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       switchTab(btn.dataset.tab);
@@ -4657,7 +4908,8 @@ function initGamificationModal() {
     const contents = {
       "quests": document.getElementById("tab-content-quests"),
       "boss": document.getElementById("tab-content-boss"),
-      "ranks": document.getElementById("tab-content-ranks")
+      "ranks": document.getElementById("tab-content-ranks"),
+      "odometer": document.getElementById("tab-content-odometer")
     };
     Object.keys(contents).forEach(k => {
       if (contents[k]) contents[k].style.display = k === tabName ? "block" : "none";
@@ -4666,6 +4918,7 @@ function initGamificationModal() {
     if (tabName === "quests") loadQuestsList();
     else if (tabName === "boss") loadMistakesRushList();
     else if (tabName === "ranks") loadRanksTree();
+    else if (tabName === "odometer") loadOdometerDashboard();
   }
 
   async function loadQuestsList() {
@@ -4870,6 +5123,87 @@ function initGamificationModal() {
     }).join("");
 
     listEl.innerHTML = statsSummary + treeHtml;
+  }
+
+  async function loadOdometerDashboard() {
+    const drumsEl = document.getElementById("modal-odometer-drums");
+    const totalEl = document.getElementById("modal-odometer-total");
+    const todayEl = document.getElementById("modal-odometer-today");
+    const uniqueEl = document.getElementById("modal-odometer-unique");
+    const comboEl = document.getElementById("modal-odometer-combo");
+    const recentEl = document.getElementById("modal-odometer-recent");
+    const topEl = document.getElementById("modal-odometer-top");
+
+    try {
+      const res = await fetch("/api/game/odometer");
+      if (!res.ok) throw new Error("Failed to fetch odometer data");
+      const data = await res.json();
+
+      const total = Number(data.total_words) || 0;
+      const today = Number(data.today_words) || 0;
+      const unique = Number(data.unique_words) || 0;
+      const maxCombo = Number(data.max_combo) || 0;
+
+      if (window.OdometerEngine) {
+        window.OdometerEngine.setLifetimeWords(total, today, unique);
+      }
+
+      if (totalEl) totalEl.textContent = `${total.toLocaleString("en-US")} 词`;
+      if (todayEl) todayEl.textContent = `${today.toLocaleString("en-US")} 词`;
+      if (uniqueEl) uniqueEl.textContent = `${unique.toLocaleString("en-US")} 词`;
+      if (comboEl) comboEl.textContent = `Combo x${maxCombo}`;
+
+      // Render digit drums (e.g. 007,380)
+      if (drumsEl) {
+        const strNum = String(total).padStart(6, "0");
+        let drumsHtml = "";
+        for (let i = 0; i < strNum.length; i++) {
+          drumsHtml += `<span class="odometer-drum-digit">${strNum[i]}</span>`;
+          if ((strNum.length - 1 - i) % 3 === 0 && i !== strNum.length - 1) {
+            drumsHtml += `<span class="odometer-drum-sep">,</span>`;
+          }
+        }
+        drumsEl.innerHTML = drumsHtml;
+      }
+
+      // Render recent words
+      if (recentEl) {
+        const recents = data.recent_words || [];
+        if (recents.length === 0) {
+          recentEl.innerHTML = '<span class="empty-hint">暂无最近打字记录，开始敲击跟打以累积总里程！</span>';
+        } else {
+          recentEl.innerHTML = recents.map(r => {
+            const timeStr = r.created_at ? r.created_at.split(" ")[1] || "" : "";
+            return `<span class="odometer-word-chip">${escapeHtml(r.word)} <span class="odometer-word-time">${escapeHtml(timeStr)}</span></span>`;
+          }).join("");
+        }
+      }
+
+      // Render top practiced words
+      if (topEl) {
+        const topList = data.top_words || [];
+        if (topList.length === 0) {
+          topEl.innerHTML = '<span class="empty-hint">暂无高频词统计，保持敲击输入！</span>';
+        } else {
+          const maxCount = Math.max(...topList.map(t => t.count), 1);
+          topEl.innerHTML = topList.map(t => {
+            const pct = Math.min(100, Math.round((t.count / maxCount) * 100));
+            return `
+              <div class="odometer-top-item">
+                <span class="odometer-top-word">${escapeHtml(t.word)}</span>
+                <div class="odometer-top-bar-box">
+                  <div class="odometer-top-bar-fill" style="width: ${pct}%;"></div>
+                </div>
+                <span class="odometer-top-count">${t.count} 次</span>
+              </div>
+            `;
+          }).join("");
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to load odometer dashboard:", err);
+      if (drumsEl) drumsEl.innerHTML = '<span style="color:#ef4444; font-size:14px;">加载失败</span>';
+    }
   }
 }
 

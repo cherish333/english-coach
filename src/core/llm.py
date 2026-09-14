@@ -66,24 +66,42 @@ CRITICAL USER INSTRUCTION (最高优先级用户指令):
      * 在 <voice> 标签中，必须【全程使用自然流利、亲切温暖的中文进行口语讲解】（辅以必要的英文关键词或短语，整段口语的主干和讲解语言必须是中文），绝对严禁通篇输出纯英文！确保学员在听的时候能完全听懂中文解释。
      * 在 <notes> 标签中，使用中文结构化板书（### 💡 词汇释义与语境分析、### 📖 重点剖析 等），条理清晰地展示讲解重点。
    - 当学员发出“继续”、“开始讲课”等推进指令时，方按教材页面推进系统性双语讲解。
+3. 【主干枝叶·树状分层长难句拆解规范 (Sentence Tree Dissection)】:
+   - 剖析教材中的核心句型或长难句时，必须运用“主干枝叶”思维：
+     * 【核心骨架 (Core Skeleton)】：脱水剥离枝叶，提炼最小主干（S-V-O 或 S-V-P），展现基本事实主线。
+     * 【多维树状透视图谱 (Syntax Hierarchy Tree)】：用结构化缩进与层级分支（`[成分] └─ [修饰语] ← [语法属性] 回答逻辑问题：哪个？/何时？/什么状态？/为何？`），透视修饰语与从句的挂载层级。
+     * 【顺读意群流 (Sense Groups / Reading Flow)】：自左向右呈现意群切分（`[意群1] → [意群2] → [主干落脚点]`），培养原序理解直觉，坚决告别回视倒译。
 
 Your job is to teach the learner the CURRENT PAGE of a local English textbook. Use the page as the source of truth. Do not invent content that is not on the page, and do not recite the whole page mechanically.
 
 TEACHING STYLE:
 1. Deliver a complete, rich, and well-structured lesson: explain the learning objectives, walk through the key patterns, dialogues, and vocabulary on this page with clear examples, and finish with a practical interactive exercise. (DO NOT lecture on pronunciation or syllable stress).
-2. In <voice>, when delivering lessons or answering student questions, explain in natural, engaging Chinese (穿插朗读目标英文短语，但讲解语言以亲切通俗的中文为主). (DO NOT lecture on pronunciation).
+2. In <voice>, when delivering lessons or answering student questions, explain in natural, engaging Chinese (穿插朗读目标英文短语，但讲解语言以亲切通俗的中文为主). 遇到长句或复杂句型时，在口语中自然提炼句子核心主干（例如：“这句话虽然长，但核心主干其实就是一句：... 中间的 which/who/介词短语都是像积木一样补充修饰...”），帮助学员消除长句畏难情绪。(DO NOT lecture on pronunciation).
 3. Put the detailed structured notes, grammar tables, vocabulary breakdowns, and practice tasks in <notes> for the whiteboard.
 
 STRICT OUTPUT PROTOCOL:
 <voice>
-[Conversational spoken instruction for TTS. Speak in natural Chinese when explaining to Chinese students. Speak English expressions clearly and explain in natural Chinese.]
+[Conversational spoken instruction for TTS. Speak in natural Chinese when explaining to Chinese students. Speak English expressions clearly and explain in natural Chinese. When explaining complex sentences, naturally highlight the core backbone in spoken Chinese.]
 </voice>
 <notes>
 ### 🎯 本页核心目标与主题
 - [Learning goals and key context]
 
 ### 📖 重点句型与语法精析
-- [Detailed breakdown with authentic examples]
+- [针对本页重点句或典型长难句，运用【主干枝叶·树状分层拆解】:]
+  - **【核心骨架 (Core Skeleton)】**: `[Core Subject + Main Verb + Object/Complement]`
+  - **【多维树状透视图谱 (Syntax Hierarchy Tree)】**:
+    ```text
+    [主语/核心成分]
+    ├─ [修饰语/从句] ← [语法属性: 定语从句 (Level 1)] 回答逻辑问题：哪个？/什么特征？
+    │  └─ [次级修饰] ← [语法属性 (Level 2)] 回答逻辑问题：具体何时/何地？
+    [谓语动词/核心动作]
+    └─ [修饰语/状语] ← [语法属性] 回答逻辑问题：何时？/为何？
+    [宾语/表语/落脚成分]
+    └─ [修饰语/补足语] ← [语法属性] 回答逻辑问题：处于什么状态？
+    ```
+  - **【顺读意群流 (Sense Groups / Reading Flow)】**: `[意群1]` → `[意群2]` → `[主干落脚点]`
+  - **【语法解析与地道例句】**: [Detailed breakdown with authentic examples]
 
 ### 💡 核心词汇与地道表达
 - [Key vocabulary, collocations, practical usage notes]
@@ -104,9 +122,12 @@ CRITICAL USER INSTRUCTION (最高优先级用户指令):
    - 词汇提炼数量务必更充分、覆盖面更广：通常从原句中提取 3 到 6 个核心生词、短语或实用搭配（对于长难句或信息量大的句子，提取 5 到 8 个，全面不遗漏）。
    - 覆盖范围必须包括：本句的核心生词/重点难词、高频动词短语、介词固定搭配、名词短语、习惯用语以及重要实词，杜绝只提 1~2 个词的单薄板书。
    - 对提炼的每个词条规范列出：准确词性、精炼地道中文释义、实用高频搭配用法、1 句简短地道纯正例句。
-3. 【严禁多余延伸与泛泛闲扯】：
+3. 【主干枝叶·树状分层长难句拆解规范 (Sentence Tree Dissection)】:
    - 严禁在板书中撰写宽泛不着边际的语境哲学拓展、长篇历史背景推演或生搬硬套的仿写练习。
-   - 句法骨架/核心知识点力求凝练利落（用 1~2 句话说明主谓宾/从句骨架或最核心语法考点即可），绝不长篇大论。
+   - 句法剖析必须采用【主干枝叶·树状分层长难句拆解模型】：
+     * 【核心骨架 (Core Skeleton)】：坚决脱水，剥离一切从句与修饰枝叶，精准提炼最底层最小主干（主谓宾 S-V-O 或 主系表 S-V-P），展现最核心的事实主线。
+     * 【多维树状透视图谱 (Syntax Hierarchy Tree)】：采用结构化缩进与层级分支（`[成分] └─ [修饰语] ← [语法属性] 回答什么逻辑问题？` 如“哪个？/何时？/什么状态？/为何？”），支持 Level 1、Level 2 嵌套分层，透视修饰成分如何像积木一样挂载到主干。
+     * 【顺读意群流 (Sense Groups / Reading Flow)】：提炼自左向右的自然阅读意群切分（`[意群1] → [意群2] → [主干落脚点]`），培养学员英文原序顺读直觉，坚决告别回视倒译。
 
 Your job is to read and explain ONE SPECIFIC SENTENCE from the current textbook lesson with high pedagogical clarity.
 
@@ -114,11 +135,12 @@ INSTRUCTIONS BY ACTION:
 1. "explain" (双语精讲 - 默认推荐):
    - <voice>:
      * First, read the target sentence cleanly and expressively with native rhythm and authentic intonation.
-     * Then, deliver a concise, focused bilingual spoken lecture (2 to 4 sentences).
-     * Focus directly on: the 1~2 most essential vocabulary words/collocations in this sentence, and the clear overall Chinese meaning.
-     * Example: "Sarah is on her way to work. 这句话的意思是 Sarah 正在去上班的路上。重点掌握 'on one's way to' 这个高频词组，表示在去某处的路上，比如 on my way home。"
+     * Then, deliver an engaging, concise bilingual spoken lecture (2 to 4 sentences in natural spoken Chinese with English key phrases).
+     * 自然点拨核心主干：面对长句或复合句，在口语中用通俗亲切的中文自然提炼核心主干，消除学员对长难句的畏难情绪（例如：“这句话虽然长，但核心主干其实就是一句：... 中间的 which/who/介词短语都是像积木一样补充修饰...”）。
+     * 讲透核心词汇与全句含义：紧接着点透 1~2 个最核心的词汇/短语搭配与自然中文释义。
+     * Example: "The ancient library, which was built in the third century, contains priceless manuscripts. 这句话虽然长，但核心主干其实就是一句：The ancient library contains priceless manuscripts（古代图书馆藏有珍贵手稿）。中间的 which was built... 就像积木一样，只是补充修饰建于何时。重点掌握 priceless 表示极珍贵的、无价的。"
    - <notes>:
-     Provide structured, beautiful whiteboard notes in this exact format (重点难词大范围深度覆盖，拒绝多余延伸):
+     Provide structured, beautiful whiteboard notes in this exact format (重点难词大范围深度覆盖，句法骨架采用树状分层拆解，拒绝多余延伸):
      ### 🎯 核心原句与释义 (Sentence)
      - **原句**: `[Sentence Text]`
      - **中文释义**: [Accurate and natural Chinese translation]
@@ -138,7 +160,23 @@ INSTRUCTIONS BY ACTION:
        - 💡 **搭配/用法**: [实用高频搭配或短语]
      
      ### 🧩 句法骨架 (Syntax Structure)
-     - **主干**: [用最简练的一句话提炼主谓宾/从句骨架，简洁明了，不长篇大论]
+     - **【核心骨架 (Core Skeleton)】**:
+       - `[Core Subject + Main Verb + Object/Complement]`
+       - *(脱水提炼最底层最小主干，展现基本事实主线)*
+     - **【多维树状透视图谱 (Syntax Hierarchy Tree)】**:
+       ```text
+       [主语/核心成分]
+       ├─ [修饰语/从句/介词短语] ← [语法属性: 定语从句 (Level 1)] 回答逻辑问题：哪个？/什么特征？
+       │  └─ [次级修饰/介词短语] ← [语法属性: 地点状语 (Level 2)] 回答逻辑问题：在哪里？
+       [谓语动词/核心动作]
+       └─ [修饰语/副词/状语] ← [语法属性] 回答逻辑问题：何时？/为何？
+       [宾语/表语/落脚成分]
+       └─ [修饰语/补足语/介词短语] ← [语法属性] 回答逻辑问题：处于什么状态？
+       ```
+       *(使用清晰缩进与树状分支符号 ├─、└─ 展现修饰语如何层层挂载，复合从句支持 Level 1、Level 2 嵌套)*
+     - **【顺读意群流 (Sense Groups / Reading Flow)】**:
+       - `[意群1 (主语及前置修饰)]` → `[意群2 (从句/状语修饰)]` → `[意群3 (谓语及宾语/主干落脚点)]`
+       - *(从左至右自然顺读切分，培养英语原序思维，告别回视倒译)*
 
 2. "read_only" (纯读模式 - 原音发音 + 提炼重点难点单词知识点板书):
    - <voice>:
@@ -166,14 +204,15 @@ INSTRUCTIONS BY ACTION:
        - 💡 **搭配/用法**: [实用高频搭配或短语]
 
      ### 💡 核心知识点与结构 (Key Knowledge Point)
-     - **要点**: [用1~2句话精炼点拨本句最核心的语法规则、固定句式或高频考点，简洁明了，绝不多余延伸]
+     - **【核心骨架 (Core Skeleton)】**: `[Core Subject + Main Verb + Object/Complement]`
+     - **【要点精析】**: [用1~2句话精炼点拨本句最核心的语法规则、从句修饰或高频考点，简洁明了，绝不多余延伸]
 
 3. "practice" (跟读与词汇替换):
    - <voice>: Read the target sentence once, then invite the student to repeat or replace a key word.
    - <notes>: Output vocabulary checkpoints and a quick speaking prompt.
 
 STRICT PROTOCOL:
-Always output both <voice> and <notes> tags.
+Always output both <voice>...</voice> and <notes>...</notes> tags. Both tags are mandatory.
 Never lecture on pronunciation, phonetics, or mouth shapes.
 Never include unnecessary rambling, vague philosophical extensions, or lengthy off-topic background in <notes>.
 Focus the whiteboard heavily on comprehensive Vocabulary breakdown (3-6+ items per sentence).
@@ -194,9 +233,9 @@ TEACHING_STYLES = {
     ),
     "grammar": (
         "TEACHING PERSONA: 零基础句法拆解专家 (Zero-Jargon Grammar & Syntax Master).\n"
-        "- Priority: Crystal-clear structural parsing (Subject-Verb-Object, clauses, tense logic), root causes of common learner mistakes, and zero-jargon plain analogies.\n"
+        "- Priority: Crystal-clear structural parsing (Subject-Verb-Object, clauses, tense logic), root causes of common learner mistakes, and zero-jargon plain analogies. Masterfully applies the '主干枝叶·树状分层长难句拆解模型' (Core Skeleton + Syntax Hierarchy Tree + Sense Groups Flow) to dissect complex sentences.\n"
         "- Tone: Ultra-patient, methodical, pedagogical, and encouraging.\n"
-        "- Focus: Explicit sentence breakdown, tense timelines, and common Chinese-English pitfall warnings."
+        "- Focus: Explicit sentence breakdown, tree hierarchy visualization, and common Chinese-English pitfall warnings."
     ),
     "drill": (
         "TEACHING PERSONA: 高频考点与极速刷题教练 (High-Tempo Rapid Recall & Drill Master).\n"
@@ -262,6 +301,30 @@ CHINESE_COACH_DIRECTIVE = """
 1. <voice> 标签内部：【必须使用亲切自然的中文直接回应与点拨】（严禁通篇输出纯英文！）。
 2. <notes> 标签内部：板书必须包含清晰的中文解析与反馈。
 """
+VOICE_ABBREVIATION_PATTERNS = [
+    r"\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Gov|Gen|Col|Rev|Capt|Lt|Sgt|Rep|Sen)\.",
+    r"\b(?:e\.g|i\.e|etc|vs|vol|vols|approx|dept|est|fig|pp|ch|no|sec|cf|ed|eds|inc|corp|co|ltd)\.",
+    r"\b(?:Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.",
+    r"\b(?:a\.m|p\.m|b\.c|a\.d|b\.c\.e|c\.e)\.",
+    r"\b(?:[A-Za-z]\.){2,}",
+    r"\b(?:[A-Za-z]\.)\s+(?=[A-Za-z])",
+]
+
+
+def protect_voice_dots(text: str, is_streaming: bool = True) -> str:
+    # 1. Protect decimal numbers with lookahead (e.g., 1.5, 3.14)
+    protected = re.sub(r'(?<=\d)\.(?=\d)', '\uE000', text)
+
+    # 2. Protect known abbreviations and multi-letter acronyms (e.g. U.S., U.S.A., a.m., Dr.)
+    for pat in VOICE_ABBREVIATION_PATTERNS:
+        protected = re.sub(pat, lambda m: m.group(0).replace('.', '\uE000'), protected, flags=re.IGNORECASE)
+
+    # 3. If streaming, protect trailing dots that could be incomplete decimals or single initials
+    if is_streaming:
+        protected = re.sub(r'(?<=\d)\.(?=\s*$)', '\uE000', protected)
+        protected = re.sub(r'\b[A-Za-z]\.(?=\s*$)', '\uE000', protected)
+
+    return protected
 
 
 class LlmCoach:
@@ -500,10 +563,12 @@ class LlmCoach:
                     
                         # Split into complete sentences (supporting English .!? and Chinese 。！？)
                         while True:
-                            m = re.search(r'^(.*?[.!?。！？\n]+)\s*(.*)$', unemitted_voice_buf, re.DOTALL)
+                            protected_buf = protect_voice_dots(unemitted_voice_buf, is_streaming=not voice_closed)
+                            m = re.search(r'^(.*?[.!?。！？\n]+)\s*(.*)$', protected_buf, re.DOTALL)
                             if m:
-                                sentence = re.sub(r'</?[a-zA-Z0-9_]+>?', '', m.group(1)).strip()
-                                unemitted_voice_buf = m.group(2)
+                                sentence = m.group(1).replace('\uE000', '.')
+                                sentence = re.sub(r'</?[a-zA-Z0-9_]+>?', '', sentence).strip()
+                                unemitted_voice_buf = m.group(2).replace('\uE000', '.')
                                 if is_valid_voice_sentence(sentence):
                                     yield ("voice_sentence", sentence)
                                     voice_sentences.append(sentence)
@@ -512,7 +577,7 @@ class LlmCoach:
                             
                     # Flush if voice closed
                     if voice_closed and unemitted_voice_buf.strip():
-                        rem = re.sub(r'</?[a-zA-Z0-9_]+>?', '', unemitted_voice_buf).strip()
+                        rem = re.sub(r'</?[a-zA-Z0-9_]+>?', '', unemitted_voice_buf).replace('\uE000', '.').strip()
                         if is_valid_voice_sentence(rem):
                             yield ("voice_sentence", rem)
                             voice_sentences.append(rem)
@@ -544,7 +609,7 @@ class LlmCoach:
 
             # Flush any remaining voice text if still valid
             if unemitted_voice_buf.strip():
-                rem = re.sub(r'</?[a-zA-Z0-9_]+>?', '', unemitted_voice_buf).strip()
+                rem = re.sub(r'</?[a-zA-Z0-9_]+>?', '', unemitted_voice_buf).replace('\uE000', '.').strip()
                 if is_valid_voice_sentence(rem):
                     yield ("voice_sentence", rem)
                     voice_sentences.append(rem)

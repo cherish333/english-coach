@@ -58,11 +58,17 @@
       </div>
 
       <div class="controls-area" aria-label="应用设置与操作">
-        <!-- Gamification HUD: Streak, Level, XP bar, Quests -->
+        <!-- Gamification HUD: Streak, Odometer, Level, XP bar, Quests -->
         <div class="hud-gamification-bar" id="hud-gamification-bar">
           <div class="hud-streak-pill" id="hud-streak-pill" title="连续学习打卡，每日坚持不断签！">
             <span class="hud-fire">🔥</span>
             <span id="hud-streak-val">1</span><span class="hud-unit">天</span>
+          </div>
+          <div class="hud-odometer-pill" id="hud-odometer-pill" title="汽车仪表盘总里程：累计敲击单词总量 (点击查看打字总里程看板)">
+            <span class="hud-odometer-icon" aria-hidden="true">🚗</span>
+            <span class="hud-odometer-label">总里程</span>
+            <span class="hud-odometer-val" id="hud-odometer-val">0</span>
+            <span class="hud-unit">词</span>
           </div>
           <div class="hud-level-group" id="hud-level-group" title="点击查看段位成长、每日任务与错题歼灭">
             <span class="hud-level-badge" id="hud-level-badge">Lv.1 萌新启航</span>
@@ -284,6 +290,12 @@
                 <div class="fs-header-left">
                   <span class="fs-badge">⌨️ 沉浸跟打模式</span>
                   <span class="fs-doc-title" id="fs-doc-title">逐句精读与对照跟打</span>
+                  <div class="fs-odometer-pill" id="fs-odometer-pill" title="汽车仪表盘打字总里程">
+                    <span class="fs-odometer-icon">🚗</span>
+                    <span class="fs-odometer-label">总里程:</span>
+                    <span class="fs-odometer-val" id="fs-odometer-val">0</span>
+                    <span class="fs-odometer-unit">词</span>
+                  </div>
                 </div>
                 <div class="fs-header-right">
                   <button id="fs-bg-toggle-btn" class="mini-icon-btn fs-bg-toggle-btn" title="切换背景效果：磨砂玻璃 / 深邃纯黑">✨ 磨砂玻璃</button>
@@ -303,6 +315,22 @@
 
               <!-- Shadow Typing Card (对照跟打强化练习区) -->
               <div class="shadow-typing-card" id="shadow-typing-card">
+                <div class="typing-card-header" id="typing-card-header">
+                  <div class="typing-header-left">
+                    <span class="typing-card-title">⌨️ 逐词跟打练习</span>
+                    <span class="typing-status-pill" id="typing-status-pill">待打字</span>
+                  </div>
+                  <div class="typing-metrics-bar">
+                    <span class="typing-combo-badge" id="typing-combo-badge">Combo x0 🔥</span>
+                    <span class="typing-wpm-badge" id="typing-wpm-badge">0 WPM</span>
+                    <div class="typing-odometer-pill" id="typing-odometer-pill" title="打字总里程表：统计敲击过的每个单词 (汽车仪表盘总里程)">
+                      <span class="typing-odometer-icon">🚗</span>
+                      <span class="typing-odometer-label">总里程</span>
+                      <span class="typing-odometer-val" id="typing-odometer-val">0</span>
+                      <span class="typing-odometer-unit">词</span>
+                    </div>
+                  </div>
+                </div>
                 <div class="typing-target-display" id="typing-target-display" tabindex="0" title="跟打练习区 (按 Tab 键可切换至上方口语互动)">
                   <span class="char-pending">载入教材后开始跟打练习</span>
                 </div>
@@ -460,6 +488,7 @@
         <button class="game-tab-btn active" data-tab="quests">🎯 每日修炼挑战</button>
         <button class="game-tab-btn" data-tab="boss">👾 错题歼灭战 (<span id="modal-mistakes-badge">0</span>)</button>
         <button class="game-tab-btn" data-tab="ranks">👑 等级与段位榜</button>
+        <button class="game-tab-btn" data-tab="odometer">🚗 仪表盘总里程</button>
       </div>
       <div class="modal-body">
         <!-- Tab 1: Quests -->
@@ -483,6 +512,65 @@
         <!-- Tab 3: Ranks Tree -->
         <div id="tab-content-ranks" class="game-tab-content" style="display: none;">
           <div class="rank-tree-list" id="modal-ranks-list"></div>
+        </div>
+
+        <!-- Tab 4: Odometer Dashboard -->
+        <div id="tab-content-odometer" class="game-tab-content" style="display: none;">
+          <div class="odometer-dashboard-container">
+            <div class="odometer-cluster-card">
+              <div class="odometer-cluster-header">
+                <span class="odometer-car-badge">🚗 汽车仪表盘总里程表</span>
+                <span class="odometer-cluster-status">● 实时统计敲击的每个单词</span>
+              </div>
+              <div class="odometer-display-meter">
+                <div class="odometer-drum-cluster" id="modal-odometer-drums">
+                  <!-- Generated digit drums -->
+                </div>
+                <div class="odometer-meter-unit">TOTAL WORDS TYPED</div>
+              </div>
+              <div class="odometer-quote">
+                “正如汽车仪表盘总里程表忠实丈量走过的每一公里，这里精确记录你敲下的每一个英文单词。”
+              </div>
+            </div>
+
+            <div class="odometer-stats-grid">
+              <div class="odometer-stat-card">
+                <div class="odometer-stat-label">🚗 生涯总里程</div>
+                <div class="odometer-stat-value text-green" id="modal-odometer-total">0 词</div>
+                <div class="odometer-stat-sub">累计敲击全部单词</div>
+              </div>
+              <div class="odometer-stat-card">
+                <div class="odometer-stat-label">📅 今日打字里程</div>
+                <div class="odometer-stat-value text-amber" id="modal-odometer-today">0 词</div>
+                <div class="odometer-stat-sub">今日持续积累</div>
+              </div>
+              <div class="odometer-stat-card">
+                <div class="odometer-stat-label">🔤 覆盖独立词汇</div>
+                <div class="odometer-stat-value text-blue" id="modal-odometer-unique">0 词</div>
+                <div class="odometer-stat-sub">不重复词汇总量</div>
+              </div>
+              <div class="odometer-stat-card">
+                <div class="odometer-stat-label">⚡ 历史峰值连击</div>
+                <div class="odometer-stat-value text-purple" id="modal-odometer-combo">Combo x0</div>
+                <div class="odometer-stat-sub">极速无错打字</div>
+              </div>
+            </div>
+
+            <div class="odometer-details-cols">
+              <div class="odometer-detail-box">
+                <div class="odometer-box-title">📜 最近敲击单词流 (Recent Words)</div>
+                <div class="odometer-recent-words" id="modal-odometer-recent">
+                  <span class="empty-hint">暂无击打记录</span>
+                </div>
+              </div>
+              <div class="odometer-detail-box">
+                <div class="odometer-box-title">📊 最高频练习词汇榜 (Top Practiced)</div>
+                <div class="odometer-top-words" id="modal-odometer-top">
+                  <span class="empty-hint">暂无词频统计</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

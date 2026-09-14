@@ -576,9 +576,47 @@ async def get_game_status_endpoint():
 
 
 VALID_GAME_ACTIONS = {
-    "typing_completed", "shadow_typing", "pronunciation_evaluated",
+    "typing_completed", "shadow_typing", "word_typed", "pronunciation_evaluated",
     "pronunciation_s_rank", "dialogue_sent", "sentence_read", "mistake_cleansed"
 }
+
+
+@app.get("/api/game/odometer")
+async def get_game_odometer_endpoint():
+    try:
+        return GamificationManager.get_odometer_stats()
+    except Exception as exc:
+        logger.exception("Failed to get odometer stats")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/game/odometer/record")
+async def record_odometer_words_endpoint(payload: dict = Body(...)):
+    try:
+        raw_words = payload.get("words")
+        if not raw_words:
+            single_word = payload.get("word")
+            if single_word:
+                raw_words = [single_word]
+            else:
+                raw_words = []
+        elif isinstance(raw_words, str):
+            raw_words = [raw_words]
+        elif not isinstance(raw_words, list):
+            raw_words = []
+
+        document_id = payload.get("document_id")
+        sentence_index = payload.get("sentence_index")
+
+        result = GamificationManager.record_words_typed(
+            words=raw_words,
+            document_id=document_id,
+            sentence_index=sentence_index
+        )
+        return result
+    except Exception as exc:
+        logger.exception("Failed to record odometer words")
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/game/action")
@@ -607,11 +645,23 @@ async def record_game_action_endpoint(payload: dict = Body(...)):
         if isinstance(sentence_text, str) and words_count == 0:
             words_count = max(1, len(sentence_text.split()))
 
+        increment_words = bool(payload.get("increment_words", True))
+        words_list = payload.get("words_list")
+        if not isinstance(words_list, list):
+            words_list = None
+        document_id = payload.get("document_id")
+        sentence_index = payload.get("sentence_index")
+
         result = GamificationManager.record_action(
             action_type=action_type,
             score=score,
             words_count=words_count,
-            combo=combo
+            combo=combo,
+            increment_words=increment_words,
+            words_list=words_list,
+            document_id=document_id,
+            sentence_index=sentence_index,
+            sentence_text=sentence_text
         )
         return {"success": True, "result": result}
     except HTTPException:
@@ -755,6 +805,10 @@ async def websocket_chat(websocket: WebSocket):
     turn_generation = 0
     send_lock = asyncio.Lock()
     lecture_context = None
+    is_transcribing = False
+
+    def is_turn_busy() -> bool:
+        return is_transcribing or bool(current_task and not current_task.done())
 
     def is_active_connection() -> bool:
         return active_websocket is websocket
@@ -909,28 +963,34 @@ async def websocket_chat(websocket: WebSocket):
         )
 
     async def process_user_speech():
+        nonlocal is_transcribing
         speech_audio = vad.get_speech_audio()
         if len(speech_audio) > 16000 * 0.25:  # At least 250ms
             logger.info(f"Processing speech: {len(speech_audio)} samples ({len(speech_audio)/16000:.2f}s)")
             await send_event({"type": "status", "text": "Transcribing speech..."})
+            is_transcribing = True
             try:
                 loop = asyncio.get_running_loop()
                 user_text = await loop.run_in_executor(
                     asr_executor, asr.transcribe, speech_audio, 16000
                 )
             except asyncio.CancelledError:
+                is_transcribing = False
                 raise
             except Exception as exc:
+                is_transcribing = False
                 logger.exception("ASR failed")
                 await send_event({"type": "error", "message": f"Speech recognition failed: {exc}"})
                 await send_event({"type": "status", "text": "Listening..."})
                 return
 
             if not is_active_connection():
+                is_transcribing = False
                 return
             if user_text:
                 logger.info(f"User speech transcribed: '{user_text}'")
                 if active_action_mode in ("read_only", "continuous_read"):
+                    is_transcribing = False
                     logger.info("Ignoring ambient speech in read_only mode")
                     await send_event({"type": "status", "text": "纯读模式（已屏蔽麦克风）"})
                     return
@@ -950,12 +1010,18 @@ async def websocket_chat(websocket: WebSocket):
                             )
                         except Exception:
                             logger.exception("Failed to auto-save pronunciation mistake")
-                await start_turn(user_text)
+                try:
+                    await start_turn(user_text)
+                finally:
+                    is_transcribing = False
             else:
+                is_transcribing = False
                 logger.info("Speech transcribed to empty string")
-                await send_event({"type": "status", "text": "Listening..."})
+                if not is_turn_busy():
+                    await send_event({"type": "status", "text": "Listening..."})
         else:
-            await send_event({"type": "status", "text": "Listening..."})
+            if not is_turn_busy():
+                await send_event({"type": "status", "text": "Listening..."})
 
 
     try:
@@ -995,7 +1061,8 @@ async def websocket_chat(websocket: WebSocket):
                 if msg_type == "audio_end":
                     logger.info("Received audio_end signal from client")
                     vad.flush()
-                    await process_user_speech()
+                    if not is_turn_busy():
+                        await process_user_speech()
 
                 elif msg_type == "set_lecture_context":
                     document_id = data.get("document_id", data.get("doc_id"))

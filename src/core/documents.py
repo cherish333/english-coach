@@ -2,6 +2,7 @@
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -82,8 +83,12 @@ class DocumentLibrary:
                 catalog = {}
 
         for pdf_path in sorted(CUSTOM_BOOKS_DIR.glob("*.pdf")):
-            clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', pdf_path.stem)
+            clean_name = re.sub(r'[^a-zA-Z0-9_\u4e00-\u9fa5]', '_', pdf_path.stem)
+            if not clean_name.strip('_'):
+                clean_name = hashlib.md5(pdf_path.stem.encode('utf-8', errors='ignore')).hexdigest()[:8]
             doc_id = f"custom_{clean_name}"
+            if doc_id in self.specs:
+                doc_id = f"{doc_id}_{hashlib.md5(str(pdf_path).encode()).hexdigest()[:6]}"
             if doc_id in self.specs:
                 continue
             entry = catalog.get(doc_id, {})
@@ -112,6 +117,8 @@ class DocumentLibrary:
     def add_custom_document(self, filename: str, content: bytes, title: Optional[str] = None, description: Optional[str] = None) -> dict:
         CUSTOM_BOOKS_DIR.mkdir(parents=True, exist_ok=True)
         clean_stem = re.sub(r'[^a-zA-Z0-9_\-\u4e00-\u9fa5]', '_', Path(filename).stem)
+        if not clean_stem.strip('_-'):
+            clean_stem = hashlib.md5(Path(filename).stem.encode('utf-8', errors='ignore')).hexdigest()[:8]
         safe_filename = f"{clean_stem}.pdf"
         target_path = CUSTOM_BOOKS_DIR / safe_filename
         
@@ -134,7 +141,10 @@ class DocumentLibrary:
 
         final_title = (title or detected_title or Path(filename).stem).strip()
         final_desc = (description or f"用户自定义教材 ({pages} 页)").strip()
-        doc_id = f"custom_{re.sub(r'[^a-zA-Z0-9_]', '_', target_path.stem)}"
+        clean_name = re.sub(r'[^a-zA-Z0-9_\u4e00-\u9fa5]', '_', target_path.stem)
+        if not clean_name.strip('_'):
+            clean_name = hashlib.md5(target_path.stem.encode('utf-8', errors='ignore')).hexdigest()[:8]
+        doc_id = f"custom_{clean_name}"
 
         spec = DocumentSpec(
             document_id=doc_id,
@@ -379,13 +389,26 @@ class DocumentLibrary:
                 valid_blocks.append((b[0], b[1], b[2], b[3], t, b[5], b[6]))
 
             # Multi-column layout detection and column-aware ordering
-            left_blocks = [b for b in valid_blocks if b[2] <= mid + 35 and b[0] < mid - 20]
-            right_blocks = [b for b in valid_blocks if b[0] >= mid - 35 and b[2] > mid + 20]
             spanning_blocks = [b for b in valid_blocks if b[0] < mid - 20 and b[2] > mid + 20]
+            spanning_ids = {id(b) for b in spanning_blocks}
+            left_blocks = [b for b in valid_blocks if id(b) not in spanning_ids and b[2] <= mid + 35 and b[0] < mid - 20]
+            right_blocks = [b for b in valid_blocks if id(b) not in spanning_ids and b[0] >= mid - 35 and b[2] > mid + 20]
 
             is_two_col = len(left_blocks) >= 2 and len(right_blocks) >= 2
 
             if is_two_col:
+                # Gutter/center-seam boundary blocks that do not strictly meet criteria
+                assigned_ids = {id(b) for b in (left_blocks + right_blocks + spanning_blocks)}
+                unassigned_blocks = [b for b in valid_blocks if id(b) not in assigned_ids]
+                for b in unassigned_blocks:
+                    cx = (b[0] + b[2]) / 2
+                    if b[0] < mid - 10 and b[2] > mid + 10:
+                        spanning_blocks.append(b)
+                    elif cx < mid:
+                        left_blocks.append(b)
+                    else:
+                        right_blocks.append(b)
+
                 right_narrative = []
                 sidebars = []
                 for b in right_blocks:
@@ -408,12 +431,25 @@ class DocumentLibrary:
                 sidebar_sorted = sorted(sidebars, key=lambda b: b[1])
 
                 ordered_blocks = []
-                ordered_blocks.extend(top_span)
-                ordered_blocks.extend(mid_span)
-                ordered_blocks.extend(left_sorted)
-                ordered_blocks.extend(right_sorted)
-                ordered_blocks.extend(sidebar_sorted)
-                ordered_blocks.extend(bot_span)
+                seen_block_ids = set()
+
+                def add_blocks(blocks):
+                    for b in blocks:
+                        if id(b) not in seen_block_ids:
+                            seen_block_ids.add(id(b))
+                            ordered_blocks.append(b)
+
+                add_blocks(top_span)
+                add_blocks(mid_span)
+                add_blocks(left_sorted)
+                add_blocks(right_sorted)
+                add_blocks(sidebar_sorted)
+                add_blocks(bot_span)
+
+                # Ensure all valid blocks are preserved in vertical reading position
+                leftover = sorted([b for b in valid_blocks if id(b) not in seen_block_ids], key=lambda b: b[1])
+                if leftover:
+                    add_blocks(leftover)
             else:
                 ordered_blocks = sorted(valid_blocks, key=lambda b: b[1])
 

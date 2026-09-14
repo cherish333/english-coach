@@ -238,3 +238,240 @@ def test_chinese_request_detection_and_prompt_injection():
     assert "严禁通篇输出纯英文" in CHINESE_LECTURE_DIRECTIVE
     assert "严禁通篇输出纯英文" in CHINESE_COACH_DIRECTIVE
 
+
+def test_cleanse_mistake_idempotence():
+    # 1. Create a test mistake note
+    note = NotesManager.save_note(
+        notes_markdown="Test mistake note for cleansing",
+        is_mistake=1,
+        sentence_text="Test sentence",
+    )
+    note_id = note["id"]
+
+    # First cleanse call should succeed and award XP
+    res1 = GamificationManager.cleanse_mistake(note_id)
+    assert res1["success"] is True
+    assert res1["note_id"] == note_id
+    assert res1["reward"]["total_xp_gained"] > 0
+
+    # Second cleanse call on the same note should return 0 affected rows (not re-reward)
+    res2 = GamificationManager.cleanse_mistake(note_id)
+    assert res2["success"] is False
+    assert "already cleansed" in res2["message"]
+
+    # Endpoint test: non-existent or already cleansed note returns success=False
+    api_res = client.post(f"/api/game/mistakes/cleanse/{note_id}")
+    assert api_res.status_code == 200
+    assert api_res.json()["success"] is False
+
+
+def test_chinese_pdf_upload_doc_id_preservation_and_no_collision():
+    import pymupdf
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((50, 50), "Sample Chinese PDF test page")
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    lib = DocumentLibrary()
+
+    # Upload two different Chinese-named files
+    doc1 = lib.add_custom_document("高三英语强化复习.pdf", pdf_bytes)
+    assert doc1["id"] == "custom_高三英语强化复习"
+    assert "_____" not in doc1["id"]
+
+    doc2 = lib.add_custom_document("雅思阅读精读精练.pdf", pdf_bytes)
+    assert doc2["id"] == "custom_雅思阅读精读精练"
+    assert doc1["id"] != doc2["id"]
+
+    # Upload symbol-only file: should not collide with custom_____
+    doc3 = lib.add_custom_document("###!@#.pdf", pdf_bytes)
+    assert not doc3["id"].endswith("_____")
+
+    # Cleanup
+    lib.delete_custom_document(doc1["id"])
+    lib.delete_custom_document(doc2["id"])
+    lib.delete_custom_document(doc3["id"])
+
+
+def test_app_js_p0_fixes():
+    from src.config import PROJECT_ROOT
+    app_js_path = PROJECT_ROOT / "src" / "static" / "app.js"
+    content = app_js_path.read_text(encoding="utf-8")
+
+    # Issue 1: lectureTotalPages initialized to 0 and safe clamping
+    assert "let lectureTotalPages = 0;" in content
+    assert "const maxPage = lectureTotalPages > 0 ? lectureTotalPages : 99999;" in content
+
+    # Issue 2: !isContinuousLecture before autoTyping block
+    assert "if (!isContinuousLecture && autoTyping)" in content
+
+
+def test_voice_sentence_splitting_abbreviation_and_decimal_protection():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from src.core.llm import LlmCoach
+
+    async def run():
+        # Specifically split chunks across abbreviation and decimal boundaries
+        chunks = [
+            '<voice>Hello Dr.',
+            ' Smith! The package weighed 1.',
+            '50 kg and was shipped to the U.S.',
+            ' yesterday. It was received by Mr.',
+            ' and Mrs. Brown at 9:00 a.m.',
+            ' Great job!</voice>',
+        ]
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not chunks:
+                    raise StopAsyncIteration
+                return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=chunks.pop(0)))])
+
+            async def close(self):
+                pass
+
+        coach = LlmCoach()
+        coach.client = AsyncMock()
+        coach.client.chat.completions.create.return_value = Stream()
+
+        speech = [text async for kind, text in coach._stream_response_impl([], 'test') if kind == 'voice_sentence']
+
+        # Verify no fragment like "Dr.", "1.", "U.", "S.", "a.", "Mr." was emitted individually
+        assert "Hello Dr. Smith!" in speech
+        assert any("1.50 kg" in s and "U.S." in s for s in speech)
+        assert any("Mr. and Mrs. Brown" in s for s in speech)
+        assert any("Great job!" in s for s in speech)
+        assert "Dr." not in speech
+        assert "1." not in speech
+        assert "U." not in speech
+        assert "S." not in speech
+        assert "a." not in speech
+        assert "Mr." not in speech
+        assert not any(s.strip() == "I live in the U." for s in speech)
+
+    asyncio.run(run())
+
+
+def test_audio_end_race_condition_protection():
+    from src.config import PROJECT_ROOT
+    server_py = (PROJECT_ROOT / "src" / "server.py").read_text(encoding="utf-8")
+    app_js = (PROJECT_ROOT / "src" / "static" / "app.js").read_text(encoding="utf-8")
+
+    # In server.py: is_turn_busy guards audio_end and process_user_speech from emitting untagged Listening
+    assert "def is_turn_busy() -> bool:" in server_py
+    assert "if not is_turn_busy():" in server_py
+    assert 'msg_type == "audio_end"' in server_py
+    assert "if not is_turn_busy():\n                        await process_user_speech()" in server_py
+
+    # In app.js: Listening status does not overwrite active Coach is thinking or speaking when untagged
+    assert 'statusPill.textContent.includes("Coach is thinking") || statusPill.classList.contains("speaking")' in app_js
+    assert "isCurrentTurnComplete = true;" in app_js
+
+
+def test_minicpm_transition_handles_docker_unavailability(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from src.core import model_runtime as module
+
+    async def run():
+        runtime = module.ModelRuntime(tmp_path)
+        runtime.binary = module.Path('/bin/true')
+        model = tmp_path / 'MiniCPM5-2B-F16.gguf'
+        model.touch()
+        runtime.model_path = str(model)
+
+        # Mock device check returning valid CUDA0
+        runtime.command = AsyncMock(return_value='Available devices: CUDA0: NVIDIA GeForce RTX')
+
+        # Simulate Docker daemon dead / socket inaccessible
+        runtime.docker = AsyncMock(side_effect=RuntimeError("Cannot connect to the Docker daemon at unix:///var/run/docker.sock"))
+        runtime.qwen_running = AsyncMock(side_effect=RuntimeError("Cannot connect to the Docker daemon at unix:///var/run/docker.sock"))
+        runtime.mini_processes = lambda: []
+
+        # Mock ready and stop_mini so startup and stop reflect real process lifecycle
+        is_minicpm_running = False
+
+        async def mock_stop_mini():
+            nonlocal is_minicpm_running
+            is_minicpm_running = False
+            runtime.child = None
+
+        runtime.stop_mini = AsyncMock(side_effect=mock_stop_mini)
+
+        async def mock_ready(m, url=None):
+            nonlocal is_minicpm_running
+            if m == 'qwen':
+                return False
+            if m == 'minicpm':
+                # If child process was started, it becomes ready
+                if runtime.child is not None and not is_minicpm_running:
+                    is_minicpm_running = True
+                return is_minicpm_running
+            return False
+
+        runtime.ready = mock_ready
+
+        # Request MiniCPM: should NOT crash with Docker daemon error
+        runtime.request('minicpm')
+        await runtime.task
+
+        assert runtime.error is None
+        assert runtime.selected == 'minicpm'
+
+        # Also test status check does not report Docker daemon failure when MiniCPM is active
+        status = await runtime.status()
+        assert status['active'] == 'minicpm'
+        assert status['error'] is None
+
+        # Also test stopping MiniCPM (target=None) when Docker is unavailable
+        runtime.request(None)
+        await runtime.task
+        assert runtime.error is None
+        assert not is_minicpm_running
+
+    asyncio.run(run())
+
+
+def test_two_column_pdf_gutter_block_preservation():
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    # Left column blocks
+    page.insert_text((50, 100), "Left column paragraph 1 text.")
+    page.insert_text((50, 200), "Left column paragraph 2 text.")
+    # Right column blocks
+    page.insert_text((350, 100), "Right column paragraph 1 text.")
+    page.insert_text((350, 200), "Right column paragraph 2 text.")
+    # Gutter block sitting right across/in center seam (mid=300, x=290..315)
+    page.insert_text((290, 150), "Special Gutter Seam Annotation Note")
+    # Wide block spanning from left to right (mid=300, x=100..330)
+    page.insert_text((100, 250), "Wide spanning block text across boundary.")
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    lib = DocumentLibrary()
+    doc_info = lib.add_custom_document("test_gutter_book.pdf", pdf_bytes)
+    doc_id = doc_info["id"]
+
+    try:
+        sentences = lib.get_page_sentences(doc_id, 1)
+        all_texts = " ".join(s["text"] for s in sentences)
+        assert "Special Gutter Seam Annotation Note" in all_texts
+        assert "Left column" in all_texts
+        assert "Right column" in all_texts
+        assert "Wide spanning block text across boundary" in all_texts
+
+        # Ensure NO block is duplicated
+        wide_matches = [s["text"] for s in sentences if "Wide spanning block" in s["text"]]
+        assert len(wide_matches) == 1
+        gutter_matches = [s["text"] for s in sentences if "Special Gutter Seam" in s["text"]]
+        assert len(gutter_matches) == 1
+    finally:
+        lib.delete_custom_document(doc_id)

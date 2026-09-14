@@ -124,6 +124,8 @@ class ModelRuntime:
             detection_error = '无法检查 Docker 状态，请确认 Docker 可用。'
         conflict = len(mini) > 1 or ((qrunning or qready) and bool(mini or mready))
         active = None if conflict else 'qwen' if qready else 'minicpm' if mready else None
+        if active == 'minicpm' or (self.selected == 'minicpm' and not qready):
+            detection_error = None
         return {'selected': self.selected, 'active': active, 'phase': self.phase if self.busy else 'conflict' if conflict else 'ready' if active else 'stopped',
                 'busy': self.busy, 'inference_count': self.users, 'error': self.error or detection_error,
                 'models': [{'id': k, 'name': v['name']} for k, v in self.models.items()]}
@@ -185,11 +187,27 @@ class ModelRuntime:
                 devices = await self.command(self.binary, '--list-devices', timeout=15, env=self.mini_environment())
                 if 'CUDA0:' not in devices:
                     raise RuntimeError('MiniCPM 未检测到 CUDA0，请检查 Unsloth 的 CUDA 运行库。旧模型保持不变。')
-            # Verify Docker is observable before making any lifecycle changes.
-            await self.qwen_running()
-            await self.docker('stop', 'single', 'batch')
+            # Verify Docker is observable before making any lifecycle changes (if Docker is available).
+            docker_available = True
+            try:
+                await self.qwen_running()
+                await self.docker('stop', 'single', 'batch')
+            except Exception as exc:
+                docker_available = False
+                if target == 'qwen':
+                    raise
+                logger.warning('Docker daemon is unavailable while managing MiniCPM: %s', exc)
+
             await self.stop_mini()
-            if await self.qwen_running() or await self.ready('qwen') or self.mini_processes() or await self.ready('minicpm'):
+
+            qwen_is_running = False
+            if docker_available:
+                try:
+                    qwen_is_running = await self.qwen_running()
+                except Exception:
+                    qwen_is_running = False
+
+            if qwen_is_running or await self.ready('qwen') or self.mini_processes() or await self.ready('minicpm'):
                 raise RuntimeError('旧模型仍在运行，无法安全启动新模型。')
             if target is None:
                 return
@@ -212,8 +230,14 @@ class ModelRuntime:
             while not await self.ready(target):
                 if target == 'qwen' and self.mini_processes():
                     raise RuntimeError('MiniCPM 被外部程序重新启动，已中止 Qwen 启动。')
-                if target == 'minicpm' and await self.qwen_running():
-                    raise RuntimeError('Qwen 被外部程序重新启动，已中止 MiniCPM 启动。')
+                if target == 'minicpm' and docker_available:
+                    try:
+                        if await self.qwen_running():
+                            raise RuntimeError('Qwen 被外部程序重新启动，已中止 MiniCPM 启动。')
+                    except Exception as e:
+                        if isinstance(e, RuntimeError) and 'Qwen 被外部程序重新启动' in str(e):
+                            raise
+                        logger.warning('Docker check failed during MiniCPM loading: %s', e)
                 if target == 'minicpm' and self.child.poll() is not None:
                     raise RuntimeError('MiniCPM 启动失败，请查看 data/model-runtime/minicpm.log。')
                 if target == 'qwen' and not await self.qwen_running():

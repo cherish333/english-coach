@@ -262,13 +262,30 @@ class NotesManager:
             )
 
         def md_to_anki_html(md: str) -> str:
-            # Simple conversion of markdown headers and bold to clean Anki HTML
+            # Simple conversion of markdown headers, code blocks, and bold to clean Anki HTML
             h = html_escape(md)
+            # 1. Stash fenced code blocks before inline backticks to preserve syntax tree formatting
+            blocks = []
+            def stash_fenced_code(match):
+                code_content = match.group(1).strip('\r\n')
+                code_content_html = code_content.replace('\r\n', '<br>').replace('\n', '<br>')
+                idx = len(blocks)
+                blocks.append(
+                    f'<pre style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; '
+                    f'padding:8px 12px; font-family:monospace; font-size:12px; line-height:1.5; '
+                    f'white-space:pre-wrap; color:#1e293b; margin:8px 0;">{code_content_html}</pre>'
+                )
+                return f"__FENCED_CODE_BLOCK_{idx}__"
+
+            h = re.sub(r'```(?:[a-zA-Z0-9_-]+)?\s*[\r\n]+(.*?)[\r\n]+```', stash_fenced_code, h, flags=re.DOTALL)
             h = re.sub(r'###\s+(.*?)(?:\n|$)', r'<h4 style="color:#4f46e5; margin:10px 0 4px 0;">\1</h4>', h)
             h = re.sub(r'##\s+(.*?)(?:\n|$)', r'<h3 style="color:#1e293b; margin:12px 0 6px 0;">\1</h3>', h)
             h = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', h)
             h = re.sub(r'`(.*?)`', r'<code style="background:#f1f5f9; color:#e11d48; padding:2px 4px; border-radius:3px;">\1</code>', h)
             h = h.replace("\n", "<br>")
+
+            for i, blk in enumerate(blocks):
+                h = h.replace(f"__FENCED_CODE_BLOCK_{i}__", blk)
             return h
 
         lines = [
