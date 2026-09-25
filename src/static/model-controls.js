@@ -16,8 +16,13 @@
     start.disabled = busy || generating;
     stop.disabled = busy || generating || (state.phase === 'stopped' && !state.error);
     start.textContent = state && state.active === select.value ? '重新启动' : state && state.active ? '切换并启动' : '启动模型';
-    const activeName = state && state.models.find(m => m.id === state.active)?.name;
-    const label = pending ? '正在提交…' : state ? (state.phase === 'ready' ? `${activeName} · 已就绪${generating ? ' · 正在生成' : ''}` : phases[state.phase] || state.phase) : '无法连接应用服务';
+    const activeName = state && state.models && state.models.find(m => m.id === state.active)?.name;
+    const targetName = state && state.models && state.models.find(m => m.id === (state.selected || select.value))?.name;
+    let phaseText = phases[state?.phase] || state?.phase;
+    if (state?.phase === 'loading') {
+      phaseText = `正在加载 ${targetName || '模型'}，请稍候…`;
+    }
+    const label = pending ? '正在提交…' : state ? (state.phase === 'ready' ? `${activeName || state.active} · 已就绪${generating ? ' · 正在生成' : ''}` : phaseText) : '无法连接应用服务';
     status.textContent = actionError || (state && state.error ? `${label} · ${state.error}` : label);
     status.title = status.textContent;
   }
@@ -26,10 +31,24 @@
       const response = await fetch('/api/models/status', {cache: 'no-store', signal: AbortSignal.timeout(10000)});
       if (!response.ok) throw new Error('模型状态获取失败');
       state = await response.json();
+      if (state && Array.isArray(state.models)) {
+        const existingValues = new Set(Array.from(select.options).map(o => o.value));
+        state.models.forEach(m => {
+          if (!existingValues.has(m.id)) {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.name;
+            select.appendChild(opt);
+          }
+        });
+      }
       if (!initialized) {
         select.value = state.active || state.selected;
         initialized = true;
       }
+      try {
+        window.dispatchEvent(new CustomEvent('model-status-updated', {detail: state}));
+      } catch (_) {}
     } catch (_) { state = null; }
     render();
   }

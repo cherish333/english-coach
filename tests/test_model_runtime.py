@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 import pytest
 from src.core import model_runtime as module
 
@@ -201,3 +201,262 @@ def test_coach_does_not_speak_xml_tool_metadata():
         speech = [text async for kind, text in coach._stream_response_impl([], 'hello') if kind == 'voice_sentence']
         assert speech == ['Hello!']
     asyncio.run(run())
+
+
+def test_control_api_accepts_bonsai(monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.server import app, runtime
+    from unittest.mock import Mock
+    request = Mock()
+    monkeypatch.setattr(runtime, 'request', request)
+    client = TestClient(app)
+    assert client.post('/api/models/select', json={'model': 'bonsai'}, headers={'Origin': 'http://testserver'}).status_code == 202
+    request.assert_called_once_with('bonsai')
+
+
+def test_bonsai_transition_and_lifecycle(tmp_path):
+    async def run():
+        runtime = module.ModelRuntime(tmp_path)
+        runtime.bonsai_binary = module.Path('/bin/true')
+        model = tmp_path / 'Ternary-Bonsai-2-27B-PQ2_0.gguf'
+        model.touch()
+        runtime.bonsai_model_path = str(model)
+        runtime.command = AsyncMock(return_value='Available devices: CUDA0: NVIDIA GeForce RTX')
+        runtime.docker = AsyncMock()
+        runtime.qwen_running = AsyncMock(return_value=False)
+        runtime.mini_processes = lambda: []
+        runtime.bonsai_processes = lambda: []
+        runtime.stop_mini = AsyncMock()
+        runtime.stop_bonsai = AsyncMock()
+
+        is_ready = False
+        async def ready(m, url=None):
+            nonlocal is_ready
+            if m == 'bonsai' and runtime.child is not None and not is_ready:
+                is_ready = True
+            return is_ready and m == 'bonsai'
+
+        runtime.ready = ready
+        runtime.request('bonsai')
+        await runtime.task
+        assert runtime.error is None
+        assert runtime.selected == 'bonsai'
+        runtime.stop_mini.assert_called_once()
+        runtime.stop_bonsai.assert_called_once()
+    asyncio.run(run())
+
+
+def test_bonsai_transition_handles_docker_unavailability(tmp_path):
+    async def run():
+        runtime = module.ModelRuntime(tmp_path)
+        runtime.bonsai_binary = module.Path('/bin/true')
+        model = tmp_path / 'Ternary-Bonsai-2-27B-PQ2_0.gguf'
+        model.touch()
+        runtime.bonsai_model_path = str(model)
+        runtime.command = AsyncMock(return_value='Available devices: CUDA0: NVIDIA GeForce RTX')
+        runtime.docker = AsyncMock(side_effect=RuntimeError("Cannot connect to the Docker daemon"))
+        runtime.qwen_running = AsyncMock(side_effect=RuntimeError("Cannot connect to the Docker daemon"))
+        runtime.mini_processes = lambda: []
+        runtime.bonsai_processes = lambda: []
+        runtime.stop_mini = AsyncMock()
+        runtime.stop_bonsai = AsyncMock()
+
+        is_bonsai_running = False
+        async def mock_ready(m, url=None):
+            nonlocal is_bonsai_running
+            if m == 'bonsai':
+                if runtime.child is not None and not is_bonsai_running:
+                    is_bonsai_running = True
+                return is_bonsai_running
+            return False
+
+        runtime.ready = mock_ready
+        runtime.request('bonsai')
+        await runtime.task
+
+        assert runtime.error is None
+        assert runtime.selected == 'bonsai'
+
+        status = await runtime.status()
+        assert status['active'] == 'bonsai'
+        assert status['error'] is None
+    asyncio.run(run())
+
+
+def test_bonsai_status_conflict_detection(tmp_path):
+    async def run():
+        runtime = module.ModelRuntime(tmp_path)
+        runtime.qwen_running = AsyncMock(return_value=False)
+        runtime.mini_processes = lambda: [(1234, 18021)]
+        runtime.bonsai_processes = lambda: [(5678, 18022)]
+
+        async def mock_ready(m, url=None):
+            if m == 'qwen':
+                return False
+            if m == 'minicpm':
+                return bool(runtime.mini_processes())
+            if m == 'bonsai':
+                return bool(runtime.bonsai_processes())
+            return False
+
+        runtime.ready = mock_ready
+
+        status = await runtime.status()
+        assert status['phase'] == 'conflict'
+        assert status['active'] is None
+
+        # When only bonsai is running
+        runtime.mini_processes = lambda: []
+        status_bonsai = await runtime.status()
+        assert status_bonsai['phase'] == 'ready'
+        assert status_bonsai['active'] == 'bonsai'
+    asyncio.run(run())
+
+
+def test_bonsai_missing_model_leaves_old_model_untouched(tmp_path):
+    async def run():
+        runtime = module.ModelRuntime(tmp_path)
+        runtime.bonsai_model_path = str(tmp_path / 'missing_bonsai.gguf')
+        runtime.docker = AsyncMock()
+        runtime.stop_mini = AsyncMock()
+        runtime.stop_bonsai = AsyncMock()
+        runtime.request('bonsai')
+        await runtime.task
+        assert runtime.error
+        runtime.docker.assert_not_called()
+        runtime.stop_mini.assert_not_called()
+        runtime.stop_bonsai.assert_not_called()
+    asyncio.run(run())
+
+
+def test_routed_client_uses_bonsai_when_active(monkeypatch):
+    async def run():
+        fake_stream = AsyncMock()
+        fake_stream.__anext__.side_effect = StopAsyncIteration
+        client = AsyncMock()
+        client.chat.completions.create.return_value = fake_stream
+        fake = type('Runtime', (), {'users': 1, 'acquire': AsyncMock(return_value=(client, 'prism-ml/Ternary-Bonsai-2-27B-gguf'))})()
+        monkeypatch.setattr(module, 'runtime', fake)
+        response = await module.RoutedClient().create(model='anything', stream=True)
+        assert client.chat.completions.create.call_args.kwargs['model'] == 'prism-ml/Ternary-Bonsai-2-27B-gguf'
+        assert fake.users == 1
+        await response.close()
+        assert fake.users == 0
+    asyncio.run(run())
+
+
+def test_parse_cmdline_formats():
+    from src.core.model_runtime import _parse_cmdline
+    # Standard format
+    m, p = _parse_cmdline(b"llama-server\x00-m\x00/models/bonsai.gguf\x00--port\x0018022\x00")
+    assert m == "/models/bonsai.gguf" and p == 18022
+
+    # Equals format
+    m, p = _parse_cmdline(b"llama-server\x00-m=/models/bonsai.gguf\x00--port=18022\x00")
+    assert m == "/models/bonsai.gguf" and p == 18022
+
+    # Long flag and short port
+    m, p = _parse_cmdline(b"llama-server\x00--model=/models/model.gguf\x00-p=8080\x00")
+    assert m == "/models/model.gguf" and p == 8080
+
+    # Short port with space
+    m, p = _parse_cmdline(b"llama-server\x00--model\x00/models/model.gguf\x00-p\x009000\x00")
+    assert m == "/models/model.gguf" and p == 9000
+
+    # Missing port or invalid port
+    m, p = _parse_cmdline(b"llama-server\x00-m\x00model.gguf\x00--port\x00notaport\x00")
+    assert m == "model.gguf" and p is None
+
+
+def test_control_api_singular_endpoints(monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.server import app, runtime
+    from unittest.mock import Mock, AsyncMock
+    request = Mock()
+    monkeypatch.setattr(runtime, 'request', request)
+    monkeypatch.setattr(runtime, 'status', AsyncMock(return_value={'selected': 'bonsai', 'active': 'bonsai', 'phase': 'ready', 'busy': False, 'inference_count': 0, 'error': None, 'models': []}))
+    client = TestClient(app)
+
+    # Test GET /api/model/current
+    res = client.get('/api/model/current')
+    assert res.status_code == 200
+    assert res.json()['active'] == 'bonsai'
+
+    # Test POST /api/model/select
+    res_select = client.post('/api/model/select', json={'model': 'bonsai'}, headers={'Origin': 'http://testserver'})
+    assert res_select.status_code == 202
+    request.assert_called_once_with('bonsai')
+
+
+def test_ready_dynamic_alias_resolution(tmp_path, monkeypatch):
+    async def run():
+        runtime = module.ModelRuntime(tmp_path)
+        class FakeResponse:
+            def raise_for_status(self): pass
+            def json(self):
+                return {
+                    "object": "list",
+                    "data": [
+                        {"id": "prism-ml/Ternary-Bonsai-2-27B-Custom-Alias", "object": "model"}
+                    ]
+                }
+
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def get(self, url, headers=None):
+                return FakeResponse()
+
+        monkeypatch.setattr(module.httpx, 'AsyncClient', lambda *args, **kwargs: FakeClient())
+        is_ready = await runtime.ready('bonsai')
+        assert is_ready is True
+        assert runtime.active_model_ids.get('bonsai') == "prism-ml/Ternary-Bonsai-2-27B-Custom-Alias"
+    asyncio.run(run())
+
+
+def test_bonsai_lora_resolution_and_args(tmp_path):
+    async def run():
+        runtime = module.ModelRuntime(tmp_path)
+        runtime.bonsai_binary = module.Path('/bin/true')
+        model = tmp_path / 'Ternary-Bonsai-2-27B-PQ2_0.gguf'
+        model.touch()
+        runtime.bonsai_model_path = str(model)
+        
+        # Test custom LoRA path override
+        custom_lora = tmp_path / 'my-custom-lora.gguf'
+        custom_lora.touch()
+        runtime.bonsai_lora_path = str(custom_lora)
+        assert runtime.resolve_bonsai_lora_path() == custom_lora
+        assert runtime.models['bonsai']['name'] == 'Bonsai 27B (无限制补丁)'
+
+        # Test LoRA scale setting
+        runtime.bonsai_lora_scale = 2.5
+        runtime.command = AsyncMock(return_value='Available devices: CUDA0: NVIDIA GeForce RTX')
+        runtime.docker = AsyncMock()
+        runtime.qwen_running = AsyncMock(return_value=False)
+        runtime.mini_processes = lambda: []
+        runtime.bonsai_processes = lambda: []
+        runtime.stop_mini = AsyncMock()
+        runtime.stop_bonsai = AsyncMock()
+
+        captured_args = []
+        def fake_popen(args, *p_args, **kwargs):
+            captured_args.extend(args)
+            proc = AsyncMock()
+            proc.poll.return_value = None
+            return proc
+
+        with patch('src.core.model_runtime.subprocess.Popen', side_effect=fake_popen):
+            is_ready = False
+            async def ready(m, url=None):
+                nonlocal is_ready
+                if m == 'bonsai' and runtime.child is not None and not is_ready:
+                    is_ready = True
+                return is_ready and m == 'bonsai'
+            runtime.ready = ready
+            runtime.request('bonsai')
+            await runtime.task
+            assert f'{custom_lora}:2.5' in captured_args
+            assert '--lora-scaled' in captured_args
+    asyncio.run(run())
+

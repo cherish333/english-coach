@@ -60,6 +60,7 @@ const sentNextBtn = document.getElementById("sent-next-btn");
 const sentProgressLabel = document.getElementById("sent-progress-label");
 const sentencePreviewBox = document.getElementById("sentence-preview-box");
 const headerActionRunBtn = document.getElementById("header-action-run-btn");
+const generateNotesBtn = document.getElementById("generate-notes-btn");
 const saveNotesBtn = document.getElementById("save-notes-btn");
 const copyNotesBtn = document.getElementById("copy-notes-btn");
 const exportNotesBtn = document.getElementById("export-notes-btn");
@@ -70,6 +71,83 @@ const modalNotesList = document.getElementById("modal-notes-list");
 
 // BroadcastChannel for instant local multi-window synchronization
 const syncChannel = new BroadcastChannel("english_coach_sync");
+
+// Dual-screen sync and portrait detection state
+let isPortraitConnected = false;
+let lastPortraitHeartbeat = 0;
+let isLocalVideoForced = false;
+let hasCurrentSentenceVideoPlayed = false;
+let currentDocHasMedia = false;
+let currentDocMediaType = null;
+let currentDocMediaUrl = null;
+let videoCheckInterval = null;
+let currentVideoPlaybackSession = 0;
+let isVideoAutoplayEnabled = localStorage.getItem("ai_coach_video_autoplay") !== "false";
+let hasUserInteracted = false;
+window.addEventListener("pointerdown", () => { hasUserInteracted = true; }, { capture: true, once: true });
+window.addEventListener("keydown", () => { hasUserInteracted = true; }, { capture: true, once: true });
+
+function formatSeconds(sec) {
+  if (sec === null || sec === undefined || isNaN(sec)) return "--:--";
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  const remSec = s % 60;
+  return `${String(m).padStart(2, '0')}:${String(remSec).padStart(2, '0')}`;
+}
+
+try {
+  syncChannel.postMessage({ type: "ping_portrait" });
+} catch (_) {}
+
+function updateVideoSyncStrip() {
+  const container = document.getElementById("video-player-container");
+  const badgeLabel = document.getElementById("video-badge-label");
+  const syncPill = document.getElementById("video-sync-status-pill");
+  const videoTsBadge = document.getElementById("video-timestamp-badge");
+  const origMediaBtn = document.getElementById("typing-original-media-btn");
+  const visibilityBtn = document.getElementById("video-visibility-toggle-btn");
+  const wrapper = document.getElementById("video-viewport-wrapper");
+
+  if (!currentDocHasMedia) {
+    if (container) container.style.display = "none";
+    if (origMediaBtn) origMediaBtn.style.display = "none";
+    return;
+  }
+
+  if (container) container.style.display = "flex";
+  if (origMediaBtn) origMediaBtn.style.display = "inline-flex";
+
+  const s = lectureSentences[currentSentenceIndex - 1];
+  if (s && typeof s.start_time === "number" && typeof s.end_time === "number") {
+    if (videoTsBadge) {
+      videoTsBadge.textContent = `${formatSeconds(s.start_time)} - ${formatSeconds(s.end_time)}`;
+    }
+  } else if (videoTsBadge) {
+    videoTsBadge.textContent = "--:-- - --:--";
+  }
+
+  if (isPortraitConnected) {
+    if (syncPill) {
+      syncPill.classList.add("portrait-connected");
+      syncPill.title = "已检测到竖屏教材端：视频原声在竖屏高清置顶播放，打字空间已完全释放";
+    }
+    if (badgeLabel) badgeLabel.textContent = "📺 竖屏声画同步中";
+    if (!isLocalVideoForced && wrapper) {
+      wrapper.classList.add("collapsed");
+      wrapper.classList.remove("expanded");
+      if (visibilityBtn) {
+        visibilityBtn.textContent = "🖥️ 本地视口";
+        visibilityBtn.classList.remove("active");
+      }
+    }
+  } else {
+    if (syncPill) {
+      syncPill.classList.remove("portrait-connected");
+      syncPill.title = "单屏模式：视频由本窗口播放，可开启悬浮窗或展开本地视口";
+    }
+    if (badgeLabel) badgeLabel.textContent = "🎬 视频原声伴学";
+  }
+}
 
 let lectureDocumentId = null;
 let lecturePage = 1;
@@ -520,9 +598,28 @@ function playNoteWordAudio(word, btnEl = null) {
     voice = selectedVoice;
   }
 
-  const audioUrl = `/api/tts?text=${encodeURIComponent(cleanWord)}&voice=${encodeURIComponent(voice)}`;
+  const cleanLower = cleanWord.toLowerCase();
+  const cacheKey = `${cleanLower}:${voice}`;
+
+  let audioUrl = `/api/tts?text=${encodeURIComponent(cleanWord)}&voice=${encodeURIComponent(voice)}`;
+  if (wordAudioCache.has(cacheKey)) {
+    audioUrl = wordAudioCache.get(cacheKey);
+  }
+
   const audio = new Audio(audioUrl);
   currentWordAudio = audio;
+
+  // Pre-cache blob if not already cached
+  if (!wordAudioCache.has(cacheKey)) {
+    fetch(audioUrl)
+      .then(r => r.ok ? r.blob() : null)
+      .then(blob => {
+        if (blob) {
+          wordAudioCache.set(cacheKey, URL.createObjectURL(blob));
+        }
+      })
+      .catch(() => {});
+  }
 
   const targetBtn = btnEl || (document.querySelector(`.vocab-play-btn[data-word="${CSS.escape ? CSS.escape(cleanWord) : cleanWord}"]`));
   if (targetBtn) {
@@ -601,13 +698,43 @@ function enhanceWhiteboardVocab(container) {
       btn.innerHTML = `<span class="vocab-play-icon" aria-hidden="true">🔊</span>`;
       strong.insertAdjacentElement("afterend", btn);
     }
+
+    // Proactively prefetch Edge-TTS audio for this word so clicking is instant
+    const voice = getEffectiveWordTtsVoice();
+    const cacheKey = `${cleanWord.toLowerCase()}:${voice}`;
+    if (!wordAudioCache.has(cacheKey)) {
+      const url = `/api/tts?text=${encodeURIComponent(cleanWord)}&voice=${encodeURIComponent(voice)}&speed=1.0`;
+      fetch(url)
+        .then(r => r.ok ? r.blob() : null)
+        .then(blob => {
+          if (blob) {
+            wordAudioCache.set(cacheKey, URL.createObjectURL(blob));
+          }
+        })
+        .catch(() => {});
+    }
   });
 }
 
+let latestWhiteboardMarkdown = "";
+
 function renderWhiteboard(mdText) {
-  whiteboardContent.innerHTML = renderMarkdownSafe(mdText);
+  latestWhiteboardMarkdown = mdText || "";
+  whiteboardContent.innerHTML = renderMarkdownSafe(latestWhiteboardMarkdown);
   enhanceWhiteboardVocab(whiteboardContent);
   whiteboardContent.scrollTop = whiteboardContent.scrollHeight;
+
+  try {
+    const s = (typeof lectureSentences !== "undefined" && lectureSentences && currentSentenceIndex) ? lectureSentences[currentSentenceIndex - 1] : null;
+    const sentText = s ? (s.text || "").replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim() : "";
+    syncChannel.postMessage({
+      type: "notes_update",
+      data: {
+        notes: latestWhiteboardMarkdown,
+        sentence: sentText
+      }
+    });
+  } catch (_) {}
 }
 
 // Click delegation for whiteboard vocabulary pronunciation
@@ -722,6 +849,18 @@ function stopAudioPlayback() {
   if (typeof loopPlaybackTimer !== "undefined" && loopPlaybackTimer) {
     clearTimeout(loopPlaybackTimer);
     loopPlaybackTimer = null;
+  }
+  const docVideo = document.getElementById("document-video-element");
+  if (docVideo && !docVideo.paused) {
+    try { docVideo.pause(); } catch (_) {}
+  }
+  try {
+    syncChannel.postMessage({ type: "pause", data: { sentence_index: currentSentenceIndex, ended: false } });
+    syncChannel.postMessage({ type: "video_pause" });
+  } catch (_) {}
+  if (typeof videoCheckInterval !== "undefined" && videoCheckInterval) {
+    clearInterval(videoCheckInterval);
+    videoCheckInterval = null;
   }
   isPlayingAudio = false;
   audioPlaybackEndTime = Date.now();
@@ -956,6 +1095,8 @@ let currentTypingRepeatRounds = parseInt(localStorage.getItem("ai_coach_typing_r
 if (![1, 2, 3].includes(currentTypingRepeatRounds)) currentTypingRepeatRounds = 1;
 let currentTypingRound = 1;
 const completedWordIndicesInCurrentRound = new Set();
+let typingScrollTargetTop = null;
+let typingScrollRafId = null;
 
 function updateTypingRepeatButton() {
   const btn = document.getElementById("typing-repeat-btn");
@@ -980,6 +1121,9 @@ function cycleTypingRepeatRounds() {
   currentTypingRepeatRounds = next;
   localStorage.setItem("ai_coach_typing_repeats", next.toString());
   updateTypingRepeatButton();
+  try {
+    syncChannel.postMessage({ type: "repeat_rounds_changed", data: { rounds: next } });
+  } catch (_) {}
 
   // If a sentence is currently active and not completed, reset round progress
   if (currentTypingTarget && !isTypingCompleted) {
@@ -988,6 +1132,12 @@ function cycleTypingRepeatRounds() {
     lastTypedLength = 0;
     const display = document.getElementById("typing-target-display");
     if (display) {
+      if (typingScrollRafId) {
+        cancelAnimationFrame(typingScrollRafId);
+        typingScrollRafId = null;
+      }
+      display.scrollTop = 0;
+      typingScrollTargetTop = null;
       display.innerHTML = currentTypingTarget
         .split("")
         .map((ch, idx) => `<span class="${idx === 0 ? 'char-current' : 'char-pending'}" data-idx="${idx}">${escapeHtml(ch)}</span>`)
@@ -1441,11 +1591,27 @@ function areTypingCharsEqual(a, b) {
 // Sentence Translation Cache & Management
 const sentenceTranslations = {};
 
+function isValidChineseTranslation(sourceText, trans) {
+  if (!trans || typeof trans !== "string") return false;
+  const t = trans.trim();
+  const s = (sourceText || "").trim();
+  if (!t || !s) return false;
+  if (t.toLowerCase() === s.toLowerCase()) return false;
+  const hasLetters = /[a-zA-Z]{2,}/.test(s);
+  const hasChinese = /[\u4e00-\u9fa5]/.test(t);
+  if (hasLetters && !hasChinese) return false;
+  return true;
+}
+
 async function fetchSentenceTranslation(text) {
   if (!text) return "";
   const cleaned = text.replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim();
   if (!cleaned) return "";
-  if (sentenceTranslations[cleaned]) return sentenceTranslations[cleaned];
+  if (isValidChineseTranslation(cleaned, sentenceTranslations[cleaned])) {
+    return sentenceTranslations[cleaned];
+  } else {
+    delete sentenceTranslations[cleaned];
+  }
 
   try {
     const res = await fetch("/api/translate", {
@@ -1455,7 +1621,7 @@ async function fetchSentenceTranslation(text) {
     });
     if (res.ok) {
       const data = await res.json();
-      if (data.translation) {
+      if (isValidChineseTranslation(cleaned, data.translation)) {
         sentenceTranslations[cleaned] = data.translation;
         updateTranslationUI(cleaned, data.translation);
         if (typeof syncChannel !== "undefined" && syncChannel) {
@@ -1470,6 +1636,13 @@ async function fetchSentenceTranslation(text) {
   } catch (err) {
     console.warn("Translation request failed:", err);
   }
+
+  const transDisplay = document.getElementById("typing-translation-display");
+  const transText = document.getElementById("typing-translation-text");
+  if (transDisplay && transText && currentTypingTarget === cleaned) {
+    transDisplay.classList.remove("loading");
+    transText.textContent = "暂无中文释义";
+  }
   return "";
 }
 
@@ -1479,7 +1652,7 @@ function updateTranslationUI(targetText, translation) {
   if (!transDisplay || !transText) return;
   if (currentTypingTarget !== targetText) return;
 
-  if (translation) {
+  if (isValidChineseTranslation(targetText, translation)) {
     transText.textContent = translation;
     transDisplay.classList.remove("loading");
   }
@@ -1490,9 +1663,9 @@ function prefetchPageTranslations(sentences) {
   const missing = [];
   for (const s of sentences) {
     const t = (s.text || "").replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim();
-    if (s.translation) {
+    if (isValidChineseTranslation(t, s.translation)) {
       sentenceTranslations[t] = s.translation;
-    } else if (t && !sentenceTranslations[t]) {
+    } else if (t && !isValidChineseTranslation(t, sentenceTranslations[t])) {
       missing.push(t);
     }
   }
@@ -1507,13 +1680,107 @@ function prefetchPageTranslations(sentences) {
     .then(r => r.json())
     .then(data => {
       if (data && data.translations) {
-        Object.assign(sentenceTranslations, data.translations);
-        if (currentTypingTarget && sentenceTranslations[currentTypingTarget]) {
+        for (const [k, v] of Object.entries(data.translations)) {
+          if (isValidChineseTranslation(k, v)) {
+            sentenceTranslations[k] = v;
+          }
+        }
+        if (currentTypingTarget && isValidChineseTranslation(currentTypingTarget, sentenceTranslations[currentTypingTarget])) {
           updateTranslationUI(currentTypingTarget, sentenceTranslations[currentTypingTarget]);
         }
       }
     })
     .catch(err => console.warn("Prefetch translations failed:", err));
+}
+
+let isGeneratingSmartNotes = false;
+let currentSmartNotesSentence = "";
+
+async function fetchSentenceSmartNotes(sentenceText, translation = "", forceRefresh = false) {
+  if (!sentenceText || !sentenceText.trim()) return;
+  const cleaned = sentenceText.replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) return;
+
+  // 1. If already cached and not forcing refresh, display immediately
+  if (!forceRefresh && sentenceNotesCache[cleaned]) {
+    currentNotesMarkdown = sentenceNotesCache[cleaned];
+    renderWhiteboard(currentNotesMarkdown);
+    return;
+  }
+
+  // If already in flight for this sentence and not forcing refresh, return
+  if (isGeneratingSmartNotes && currentSmartNotesSentence === cleaned && !forceRefresh) {
+    return;
+  }
+
+  isGeneratingSmartNotes = true;
+  currentSmartNotesSentence = cleaned;
+
+  // Display loading state on whiteboard
+  if (whiteboardContent) {
+    whiteboardContent.innerHTML = `
+      <div class="loading-notes">
+        <div class="loading-icon">⚡</div>
+        <div style="font-size: 13.5px; font-weight: 600; color: var(--accent, #38bdf8); margin-bottom: 4px;">正在通过云端 AI 提炼句法骨架与生词精讲…</div>
+        <div style="font-size: 11.5px; color: var(--muted); max-width: 280px; line-height: 1.5;">深度拆解长难句语法树，精准提炼重点生词短语及原生例句</div>
+      </div>
+    `;
+  }
+
+  if (generateNotesBtn) {
+    generateNotesBtn.disabled = true;
+    generateNotesBtn.innerHTML = `⏳ 生成中…`;
+  }
+
+  try {
+    const resp = await fetch("/api/sentence/smart-notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sentence: cleaned,
+        translation: translation || sentenceTranslations[cleaned] || "",
+        force_refresh: !!forceRefresh
+      })
+    });
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+
+    const data = await resp.json();
+    if (data.success && data.notes_markdown) {
+      sentenceNotesCache[cleaned] = data.notes_markdown;
+      currentNotesMarkdown = data.notes_markdown;
+      renderWhiteboard(currentNotesMarkdown);
+      if (forceRefresh) {
+        showToast("✨ 智能板书已更新！");
+      }
+    } else {
+      throw new Error(data.error || "生成失败");
+    }
+  } catch (err) {
+    console.error("Failed to generate smart notes:", err);
+    if (whiteboardContent && currentSmartNotesSentence === cleaned) {
+      whiteboardContent.innerHTML = `
+        <div class="empty-state" style="padding: 30px 16px; text-align: center;">
+          <div class="empty-icon" style="color: #ef4444;">⚠️</div>
+          <h3 style="font-size: 13.5px; margin: 8px 0;">智能板书生成异常</h3>
+          <p style="font-size: 12px; color: var(--muted); margin-bottom: 12px;">${escapeHtml(err.message || "网络超时或服务异常")}</p>
+          <button class="btn btn-xs btn-accent" id="retry-smart-notes-btn">重试生成</button>
+        </div>
+      `;
+      const retryBtn = document.getElementById("retry-smart-notes-btn");
+      if (retryBtn) {
+        retryBtn.addEventListener("click", () => fetchSentenceSmartNotes(cleaned, translation, true));
+      }
+    }
+  } finally {
+    isGeneratingSmartNotes = false;
+    if (generateNotesBtn) {
+      generateNotesBtn.disabled = false;
+      generateNotesBtn.innerHTML = `⚡ 智能板书`;
+    }
+  }
 }
 
 function setupShadowTyping(targetText, translation = null) {
@@ -1529,6 +1796,13 @@ function setupShadowTyping(targetText, translation = null) {
   const transToggleBtn = document.getElementById("typing-trans-toggle-btn");
 
   if (!display) return;
+
+  if (typingScrollRafId) {
+    cancelAnimationFrame(typingScrollRafId);
+    typingScrollRafId = null;
+  }
+  display.scrollTop = 0;
+  typingScrollTargetTop = null;
 
   currentTypingTarget = (targetText || "")
     .replace(/[\u00a0\u202f\u2009\u3000]/g, " ")
@@ -1608,6 +1882,8 @@ function setupShadowTyping(targetText, translation = null) {
     display.classList.remove("typing-active");
     if (pill) { pill.className = "typing-status-pill"; pill.textContent = "待打字"; }
     if (progressText) progressText.textContent = "进度: 0 / 0 字符";
+    display.scrollTop = 0;
+    typingScrollTargetTop = null;
     return;
   }
 
@@ -1623,25 +1899,84 @@ function setupShadowTyping(targetText, translation = null) {
     }
   }
 
+  const dockedSentTag = document.getElementById("docked-tag-sentence");
+  if (dockedSentTag) {
+    dockedSentTag.textContent = `当前第 ${currentSentenceIndex || 1} 句`;
+  }
+
   // Render character spans (English target only)
   display.innerHTML = currentTypingTarget
     .split("")
     .map((ch, idx) => `<span class="${idx === 0 ? 'char-current' : 'char-pending'}" data-idx="${idx}">${escapeHtml(ch)}</span>`)
     .join("");
   display.classList.remove("typing-active");
+  display.scrollTop = 0;
+  typingScrollTargetTop = null;
 
   // Update translation display
-  if (translation) {
+  if (isValidChineseTranslation(currentTypingTarget, translation)) {
     sentenceTranslations[currentTypingTarget] = translation;
   }
   if (transDisplay && transText) {
-    if (sentenceTranslations[currentTypingTarget]) {
+    if (isValidChineseTranslation(currentTypingTarget, sentenceTranslations[currentTypingTarget])) {
       transText.textContent = sentenceTranslations[currentTypingTarget];
       transDisplay.classList.remove("loading");
     } else {
       transText.textContent = "正在获取中文释义...";
       transDisplay.classList.add("loading");
       fetchSentenceTranslation(currentTypingTarget);
+    }
+  }
+}
+
+function requestScrollTypingTarget() {
+  if (typingScrollRafId) cancelAnimationFrame(typingScrollRafId);
+  typingScrollRafId = requestAnimationFrame(() => {
+    typingScrollRafId = null;
+    scrollTypingTargetToActiveChar();
+  });
+}
+
+function scrollTypingTargetToActiveChar() {
+  const display = document.getElementById("typing-target-display");
+  if (!display) return;
+  if (display.clientHeight <= 0 || display.scrollHeight <= display.clientHeight) return;
+
+  const activeSpan = display.querySelector(".char-current") || display.querySelector("span[data-idx]:last-child");
+  if (!activeSpan) return;
+
+  const displayRect = display.getBoundingClientRect();
+  const spanRect = activeSpan.getBoundingClientRect();
+
+  const currentScrollTop = display.scrollTop;
+  const visibleHeight = display.clientHeight;
+
+  // Absolute coordinate inside scrollable content
+  const spanContentTop = (spanRect.top - displayRect.top) + currentScrollTop;
+  const spanContentBottom = (spanRect.bottom - displayRect.top) + currentScrollTop;
+
+  const spanHeight = spanRect.height || 36;
+  // Keep generous breathing room so user can easily see upcoming line(s)
+  const bottomPadding = Math.min(visibleHeight * 0.45, Math.max(spanHeight * 1.25, 48));
+  const topPadding = Math.min(visibleHeight * 0.25, Math.max(spanHeight * 0.5, 20));
+
+  let targetScrollTop = currentScrollTop;
+
+  if (spanContentBottom > currentScrollTop + visibleHeight - bottomPadding) {
+    targetScrollTop = spanContentBottom - visibleHeight + bottomPadding;
+  } else if (spanContentTop < currentScrollTop + topPadding) {
+    targetScrollTop = spanContentTop - topPadding;
+  }
+
+  targetScrollTop = Math.max(0, Math.min(targetScrollTop, display.scrollHeight - visibleHeight));
+
+  if (Math.abs(targetScrollTop - currentScrollTop) > 3) {
+    if (typingScrollTargetTop === null || Math.abs(targetScrollTop - typingScrollTargetTop) > 3) {
+      typingScrollTargetTop = targetScrollTop;
+      display.scrollTo({
+        top: targetScrollTop,
+        behavior: "smooth"
+      });
     }
   }
 }
@@ -1658,6 +1993,10 @@ function handleTypingInput() {
 
   if (!typingStartTime && typed.length > 0) {
     typingStartTime = Date.now();
+    if (currentDocHasMedia && !hasCurrentSentenceVideoPlayed && isVideoAutoplayEnabled) {
+      hasCurrentSentenceVideoPlayed = true;
+      playSentenceAudioDirect(currentSentenceIndex);
+    }
   }
 
   const spans = display.querySelectorAll("span[data-idx]");
@@ -1681,6 +2020,9 @@ function handleTypingInput() {
       span.className = "char-pending";
     }
   }
+
+  // Auto-scroll display container to keep active typing character/cursor in comfortable view
+  requestScrollTypingTarget();
 
   // Hit audio and combo calculation
   if (typed.length > lastTypedLength) {
@@ -1736,12 +2078,13 @@ function handleTypingInput() {
   }
 
   // Update WPM
+  let currentWpm = 0;
   if (typingStartTime && typed.length > 0) {
     const elapsedSec = (Date.now() - typingStartTime) / 1000;
     if (elapsedSec > 0.6) {
       const words = typed.length / 5;
-      const wpm = Math.round((words / elapsedSec) * 60);
-      if (wpmBadge) wpmBadge.textContent = `${wpm} WPM`;
+      currentWpm = Math.round((words / elapsedSec) * 60);
+      if (wpmBadge) wpmBadge.textContent = `${currentWpm} WPM`;
     }
   }
 
@@ -1754,8 +2097,6 @@ function handleTypingInput() {
   }
 
   if (hasError) {
-    display.classList.add("error-shake");
-    setTimeout(() => display.classList.remove("error-shake"), 350);
     if (pill) { pill.className = "typing-status-pill"; pill.textContent = "存在拼写错误"; }
   } else if (typed.length > 0 && typed.length < currentTypingTarget.length) {
     let wordHint = "";
@@ -1772,6 +2113,24 @@ function handleTypingInput() {
         : `跟打中${wordHint}…`;
     }
   }
+
+  // Broadcast real-time typing sync to companion screen (portrait)
+  try {
+    syncChannel.postMessage({
+      type: "typing_sync",
+      data: {
+        source: "landscape",
+        sentence_index: currentSentenceIndex,
+        target: currentTypingTarget,
+        typed: typedBuffer,
+        combo: currentTypingCombo,
+        wpm: currentWpm,
+        completed: false,
+        round: currentTypingRound,
+        repeatRounds: currentTypingRepeatRounds
+      }
+    });
+  } catch (_) {}
 
   // Check completion
   const isMatch = (typed.length === currentTypingTarget.length && !hasError);
@@ -1793,6 +2152,8 @@ function handleTypingInput() {
         .split("")
         .map((ch, idx) => `<span class="${idx === 0 ? 'char-current' : 'char-pending'}" data-idx="${idx}">${escapeHtml(ch)}</span>`)
         .join("");
+      display.scrollTop = 0;
+      typingScrollTargetTop = null;
       if (progressText) {
         progressText.textContent = `进度: 0 / ${currentTypingTarget.length} 字符 (第 ${currentTypingRound}/${currentTypingRepeatRounds} 遍)`;
       }
@@ -2486,11 +2847,35 @@ async function loadLecturePage(requestedPage, targetSentenceIndex = null) {
     // Load sentences directly from HTTP endpoint without WebSocket race
     if (sentRes.ok) {
       const sentData = await sentRes.json();
+      currentDocHasMedia = !!sentData.has_media;
+      currentDocMediaType = sentData.media_type || "video/mp4";
+      currentDocMediaUrl = sentData.media_url || (currentDocHasMedia ? `/api/documents/${safeId}/media` : null);
+
+      const videoContainer = document.getElementById("video-player-container");
+      const origMediaBtn = document.getElementById("typing-original-media-btn");
+      const videoEl = document.getElementById("document-video-element");
+
+      if (currentDocHasMedia && currentDocMediaUrl) {
+        if (videoEl && (!videoEl.src || !videoEl.src.includes(`/api/documents/${safeId}/media`))) {
+          videoEl.src = currentDocMediaUrl;
+          videoEl.load();
+        }
+      } else {
+        if (videoEl) {
+          if (!videoEl.paused) {
+            try { videoEl.pause(); } catch (_) {}
+          }
+          videoEl.removeAttribute("src");
+          videoEl.load();
+        }
+      }
+      updateVideoSyncStrip();
+
       if (Array.isArray(sentData.sentences)) {
         lectureSentences = sentData.sentences;
         const targetIdx = (pendingTargetSentenceIndex !== null && pendingTargetSentenceIndex >= 1)
           ? pendingTargetSentenceIndex
-          : ((targetSentenceIndex !== null && targetSentenceIndex >= 1) ? targetSentenceIndex : (currentSentenceIndex || 1));
+          : ((targetSentenceIndex !== null && targetSentenceIndex !== undefined && targetSentenceIndex >= 1) ? targetSentenceIndex : 1);
         currentSentenceIndex = Math.max(1, Math.min(targetIdx, lectureSentences.length || 1));
         pendingTargetSentenceIndex = null;
         renderPdfSentenceHighlights(lectureSentences);
@@ -2514,10 +2899,19 @@ async function loadLecturePage(requestedPage, targetSentenceIndex = null) {
       };
     }
 
-    // Broadcast page update to portrait screen
+    // Broadcast page update and video mode to portrait screen
+    syncChannel.postMessage({
+      type: "video_mode",
+      data: {
+        enabled: currentDocHasMedia,
+        has_media: currentDocHasMedia,
+        media_url: currentDocMediaUrl,
+        document_id: data.id
+      }
+    });
     syncChannel.postMessage({
       type: "page_updated",
-      data: { document_id: data.id, page: data.page }
+      data: { document_id: data.id, page: data.page, sentence_index: currentSentenceIndex }
     });
 
     // Save learning progress
@@ -2541,13 +2935,14 @@ let loopPlaybackTimer = null;
 let userStartedLoop = false;
 
 function replayCurrentSentenceAudio() {
-  const replayBtn = document.getElementById("typing-replay-btn");
+  const replayBtn = document.getElementById("typing-original-media-btn") || document.getElementById("typing-replay-btn");
   playSentenceAudioDirect(currentSentenceIndex, replayBtn);
-  showToast("🔊 重新播放原句读音 (Alt+R)");
+  showToast(currentDocHasMedia ? "🎬 重放原声视频片段 (Alt+V / Alt+R)" : "🔊 重新播放原句读音 (Alt+R)");
 }
 
-function toggleLoopPlayback(explicitState = null) {
+function toggleLoopPlayback(explicitState = null, broadcast = true) {
   if (explicitState !== null) {
+    if (isLoopPlayback === !!explicitState) return;
     isLoopPlayback = !!explicitState;
   } else {
     isLoopPlayback = !isLoopPlayback;
@@ -2559,6 +2954,14 @@ function toggleLoopPlayback(explicitState = null) {
     loopBtn.title = isLoopPlayback 
       ? "单句循环播放 (开启中·读完自动复读，点击关闭，快捷键: Alt+L)" 
       : "单句循环播放 (已关闭·点击开启，快捷键: Alt+L)";
+  }
+  if (broadcast) {
+    try {
+      syncChannel.postMessage({
+        type: "loop_mode",
+        data: { loop: isLoopPlayback }
+      });
+    } catch (_) {}
   }
   if (isLoopPlayback) {
     userStartedLoop = true;
@@ -2590,13 +2993,186 @@ function playSentenceAudioDirect(index, btnEl) {
   // Stop previous direct audio and streaming audio cleanly
   stopAudioPlayback();
 
-  const matchingBtns = document.querySelectorAll(`.inline-play-btn[data-index="${index}"]`);
+  const matchingBtns = document.querySelectorAll(`.inline-play-btn[data-index="${index}"], #typing-original-media-btn, #video-replay-clip-btn`);
   matchingBtns.forEach(b => b.classList.add("playing"));
   if (btnEl) {
     btnEl.classList.add("playing");
     currentDirectBtn = btnEl;
   }
 
+  // Branch 1: Play authentic YouTube video/audio clip if document has original media
+  const videoEl = document.getElementById("document-video-element");
+  const hasOriginalMedia = currentDocHasMedia && typeof s.start_time === "number" && typeof s.end_time === "number" && s.end_time > s.start_time;
+
+  if (hasOriginalMedia) {
+    hasCurrentSentenceVideoPlayed = true;
+
+    // When portrait screen is connected and local video is not forced open:
+    if (isPortraitConnected && !isLocalVideoForced) {
+      try {
+        syncChannel.postMessage({
+          type: "video_play_clip",
+          data: {
+            sentence_index: index,
+            start_time: s.start_time,
+            end_time: s.end_time,
+            loop: isLoopPlayback
+          }
+        });
+      } catch (_) {}
+      if (videoEl && !videoEl.paused) {
+        try { videoEl.pause(); } catch (_) {}
+      }
+      return;
+    }
+
+    const sessionId = ++currentVideoPlaybackSession;
+    if (videoCheckInterval) {
+      clearInterval(videoCheckInterval);
+      videoCheckInterval = null;
+    }
+
+    const startTime = Math.max(0, s.start_time);
+    const endTime = Math.max(startTime + 0.1, s.end_time);
+
+    const resetVideoPlayState = () => {
+      matchingBtns.forEach(b => b.classList.remove("playing"));
+      if (btnEl) btnEl.classList.remove("playing");
+      if (currentDirectBtn === btnEl) currentDirectBtn = null;
+      if (videoCheckInterval) {
+        clearInterval(videoCheckInterval);
+        videoCheckInterval = null;
+      }
+    };
+
+    const startMonitor = () => {
+      if (sessionId !== currentVideoPlaybackSession) return;
+      const playPromise = videoEl.play();
+      if (playPromise !== undefined) {
+        playPromise.then(() => {
+          if (sessionId !== currentVideoPlaybackSession) return;
+          if (videoCheckInterval) clearInterval(videoCheckInterval);
+          videoCheckInterval = setInterval(() => {
+            if (sessionId !== currentVideoPlaybackSession) {
+              clearInterval(videoCheckInterval);
+              return;
+            }
+            if (videoEl.seeking) return;
+            if (videoEl.currentTime < startTime - 0.5) return;
+
+            if (videoEl.currentTime >= endTime || videoEl.ended) {
+              videoEl.pause();
+              resetVideoPlayState();
+
+              // Loop playback
+              if (isLoopPlayback) {
+                if (loopPlaybackTimer) clearTimeout(loopPlaybackTimer);
+                loopPlaybackTimer = setTimeout(() => {
+                  if (isLoopPlayback && sessionId === currentVideoPlaybackSession) {
+                    const loopBtn = document.getElementById("typing-loop-btn");
+                    playSentenceAudioDirect(index, loopBtn || btnEl);
+                  }
+                }, 650);
+                return;
+              }
+
+              // Continuous reading advance
+              if (isContinuousLecture && continuousAction === "read_only") {
+                if (currentSentenceIndex < lectureSentences.length) {
+                  setStatus(`第 ${currentSentenceIndex} 句播放完毕，准备下一句…`, "speaking");
+                  clearTimeout(continuousTimer);
+                  continuousTimer = setTimeout(() => {
+                    if (!isContinuousLecture) return;
+                    currentSentenceIndex++;
+                    updateSentencePreview();
+                    playSentenceAudioDirect(currentSentenceIndex);
+                    syncChannel.postMessage({
+                      type: "continuous_progress",
+                      data: { running: true, sentence_index: currentSentenceIndex, total: lectureSentences.length }
+                    });
+                  }, 600);
+                } else {
+                  stopContinuousLecture();
+                  showToast("🎉 本页所有句子视频原声播放完成！");
+                  syncChannel.postMessage({
+                    type: "continuous_progress",
+                    data: { running: false, finished: true }
+                  });
+                }
+              }
+            }
+          }, 30);
+        }).catch(err => {
+          console.warn("Video playback failed, falling back to TTS:", err);
+          resetVideoPlayState();
+          playSyntheticSentenceTts(s, text, index, btnEl, matchingBtns);
+        });
+      }
+    };
+
+    const seekAndStart = () => {
+      if (Math.abs(videoEl.currentTime - startTime) > 0.15) {
+        let seekHandled = false;
+        const timeoutId = setTimeout(() => {
+          if (!seekHandled) {
+            seekHandled = true;
+            try { videoEl.removeEventListener("seeked", onSeeked); } catch (_) {}
+            startMonitor();
+          }
+        }, 600);
+        const onSeeked = () => {
+          if (!seekHandled) {
+            seekHandled = true;
+            clearTimeout(timeoutId);
+            videoEl.removeEventListener("seeked", onSeeked);
+            startMonitor();
+          }
+        };
+        videoEl.addEventListener("seeked", onSeeked, { once: true });
+        try {
+          videoEl.currentTime = startTime;
+        } catch (err) {
+          if (!seekHandled) {
+            seekHandled = true;
+            clearTimeout(timeoutId);
+            try { videoEl.removeEventListener("seeked", onSeeked); } catch (_) {}
+            startMonitor();
+          }
+        }
+      } else {
+        startMonitor();
+      }
+    };
+
+    if (videoEl.readyState >= 1) {
+      seekAndStart();
+    } else {
+      let metaHandled = false;
+      const metaTimeoutId = setTimeout(() => {
+        if (!metaHandled) {
+          metaHandled = true;
+          try { videoEl.removeEventListener("loadedmetadata", onMeta); } catch (_) {}
+          seekAndStart();
+        }
+      }, 1000);
+      const onMeta = () => {
+        if (!metaHandled) {
+          metaHandled = true;
+          clearTimeout(metaTimeoutId);
+          videoEl.removeEventListener("loadedmetadata", onMeta);
+          seekAndStart();
+        }
+      };
+      videoEl.addEventListener("loadedmetadata", onMeta, { once: true });
+    }
+    return;
+  }
+
+  // Branch 2: Synthetic TTS (Edge-TTS / Web Speech)
+  playSyntheticSentenceTts(s, text, index, btnEl, matchingBtns);
+}
+
+function playSyntheticSentenceTts(s, text, index, btnEl, matchingBtns) {
   // Determine Edge-TTS voice for sentence pronunciation (Default to pure native US English Jenny)
   let voice = "en-US-JennyNeural";
   const voiceSelectEl = document.getElementById("voice-select");
@@ -2915,7 +3491,7 @@ function getCurrentDocumentTitle() {
 }
 
 // Sentence Focus & Navigation
-function updateSentencePreview() {
+function updateSentencePreview(broadcast = true, triggerAutoplay = true) {
   if (!lectureSentences || lectureSentences.length === 0) {
     sentProgressLabel.textContent = "第 0 / 0 句";
     sentencePreviewBox.textContent = "当前页未提取到独立句子";
@@ -2927,9 +3503,39 @@ function updateSentencePreview() {
   sentProgressLabel.textContent = `第 ${currentSentenceIndex} / ${lectureSentences.length} 句`;
   const s = lectureSentences[currentSentenceIndex - 1];
   if (s && s.text) {
-    sentencePreviewBox.innerHTML = `<span class="sentence-text-val">${escapeHtml(s.text)}</span> <button id="landscape-sent-play-btn" class="inline-play-btn" data-index="${currentSentenceIndex}" onclick="event.stopPropagation(); playSentenceAudioDirect(currentSentenceIndex, this);" title="播放原句读音" aria-label="播放原句读音">🔊</button>`;
+    const hasMedia = !!(currentDocHasMedia && typeof s.start_time === "number");
+    const playBtnTitle = hasMedia ? "播放视频原声 (Alt+V / Alt+R)" : "播放原句读音 (Alt+R)";
+    const playBtnIcon = hasMedia ? "🎬 原声" : "🔊";
+    sentencePreviewBox.innerHTML = `<span class="sentence-text-val">${escapeHtml(s.text)}</span> <button id="landscape-sent-play-btn" class="inline-play-btn ${hasMedia ? 'has-media-btn' : ''}" data-index="${currentSentenceIndex}" onclick="event.stopPropagation(); playSentenceAudioDirect(currentSentenceIndex, this);" title="${playBtnTitle}" aria-label="${playBtnTitle}">${playBtnIcon}</button>`;
   } else {
     sentencePreviewBox.textContent = "";
+  }
+
+  hasCurrentSentenceVideoPlayed = false;
+  updateVideoSyncStrip();
+
+  const videoEl = document.getElementById("document-video-element");
+  if (s && typeof s.start_time === "number" && typeof s.end_time === "number") {
+    if (currentDocHasMedia && isVideoAutoplayEnabled && hasUserInteracted && triggerAutoplay) {
+      playSentenceAudioDirect(currentSentenceIndex);
+    } else if (!isPortraitConnected && videoEl && !videoEl.seeking && videoEl.paused && Math.abs(videoEl.currentTime - s.start_time) > 0.5) {
+      try {
+        if (videoEl.readyState >= 1) {
+          videoEl.currentTime = s.start_time;
+        } else {
+          videoEl.addEventListener("loadedmetadata", () => {
+            try { videoEl.currentTime = s.start_time; } catch (_) {}
+          }, { once: true });
+        }
+      } catch (_) {}
+    } else if (isPortraitConnected && !triggerAutoplay && typeof s.start_time === "number") {
+      try {
+        syncChannel.postMessage({
+          type: "seek",
+          data: { time: s.start_time, sentence_index: currentSentenceIndex }
+        });
+      } catch (_) {}
+    }
   }
   const docTitleEl = document.getElementById("fs-doc-title");
   if (docTitleEl) {
@@ -2937,23 +3543,35 @@ function updateSentencePreview() {
     docTitleEl.textContent = `${docName} (P. ${lecturePage || 1} · 第 ${currentSentenceIndex} / ${lectureSentences.length} 句)`;
   }
   const cleanedText = s ? (s.text || "").replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim() : "";
-  const cachedTranslation = cleanedText ? (sentenceTranslations[cleanedText] || s?.translation || null) : null;
+  const rawTrans = cleanedText ? (sentenceTranslations[cleanedText] || s?.translation || null) : null;
+  const cachedTranslation = isValidChineseTranslation(cleanedText, rawTrans) ? rawTrans : null;
   setupShadowTyping(s ? s.text : "", cachedTranslation);
 
   // If notes are cached for this sentence, display immediately on whiteboard
   if (cleanedText && sentenceNotesCache[cleanedText]) {
     currentNotesMarkdown = sentenceNotesCache[cleanedText];
     renderWhiteboard(currentNotesMarkdown);
+  } else if (cleanedText) {
+    // Proactively fetch smart notes from server (from SQLite cache or Cloud API)
+    fetchSentenceSmartNotes(cleanedText, cachedTranslation, false);
   }
 
   // Update PDF page real-time highlight
   highlightActivePdfSentence(currentSentenceIndex);
 
-  // Broadcast to portrait window
-  syncChannel.postMessage({
-    type: "sentence_selected",
-    data: { sentence_index: currentSentenceIndex }
-  });
+  // Broadcast to portrait window if requested
+  if (broadcast) {
+    syncChannel.postMessage({
+      type: "sentence_change",
+      data: {
+        sentence_index: currentSentenceIndex,
+        start_time: s ? s.start_time : null,
+        end_time: s ? s.end_time : null,
+        auto_play: isVideoAutoplayEnabled && hasUserInteracted && triggerAutoplay,
+        source: "landscape"
+      }
+    });
+  }
 
   // Save learning progress
   if (lectureDocumentId) {
@@ -2993,9 +3611,17 @@ function triggerSentenceAction(index, text, action = "explain") {
   if (cleanedText && sentenceNotesCache[cleanedText]) {
     currentNotesMarkdown = sentenceNotesCache[cleanedText];
     renderWhiteboard(currentNotesMarkdown);
-  } else {
-    currentNotesMarkdown = "";
-    whiteboardContent.innerHTML = "<div class='loading-notes'>正在提炼重点难词与核心知识点…</div>";
+  } else if (cleanedText) {
+    fetchSentenceSmartNotes(cleanedText, "", false);
+  }
+
+  if (action === "read_only" && currentDocHasMedia) {
+    const s = lectureSentences.find(item => item.index === index) || lectureSentences[index - 1];
+    if (s && typeof s.start_time === "number" && typeof s.end_time === "number" && s.end_time > s.start_time) {
+      lectureStatus.textContent = "正在播放视频原声…";
+      playSentenceAudioDirect(index);
+      return;
+    }
   }
 
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -3014,8 +3640,15 @@ function triggerSentenceAction(index, text, action = "explain") {
 syncChannel.onmessage = (event) => {
   const { type, data } = event.data || {};
   if (type === "page_change_requested") {
-    if (data.page && data.page !== lecturePage) {
-      loadLecturePage(data.page);
+    const currentDoc = (lectureDocSelect && lectureDocSelect.value) || lectureDocumentId;
+    if (data && data.document_id && data.document_id !== currentDoc) {
+      switchDocument(data.document_id, data.page, data.sentence_index);
+    } else if (data && data.page && data.page !== lecturePage) {
+      loadLecturePage(data.page, data.sentence_index || 1);
+    } else if (data && data.sentence_index && data.sentence_index !== currentSentenceIndex) {
+      currentSentenceIndex = Math.max(1, Math.min(data.sentence_index, lectureSentences.length));
+      hasCurrentSentenceVideoPlayed = true;
+      updateSentencePreview(false, false);
     }
   } else if (type === "sentence_action_requested") {
     triggerSentenceAction(data.sentence_index, data.sentence_text, data.action);
@@ -3050,19 +3683,187 @@ syncChannel.onmessage = (event) => {
       window.OdometerEngine.setLifetimeWords(data.total_words, data.today_words, data.unique_words);
     }
   } else if (type === "sentence_translation") {
-    // Another window fetched a translation - cache it locally and update UI if relevant
-    if (data && data.text && data.translation) {
+    // Another window fetched a translation - validate before caching locally and updating UI
+    if (data && data.text && isValidChineseTranslation(data.text, data.translation)) {
       sentenceTranslations[data.text] = data.translation;
       updateTranslationUI(data.text, data.translation);
     }
+  } else if (type === "typing_dock_change") {
+    if (data && data.dock) {
+      setTypingDock(data.dock, false);
+    }
+  } else if (type === "notes_dock_change") {
+    if (data && data.dock) {
+      setNotesDock(data.dock, false);
+    }
+  } else if (type === "notes_update") {
+    if (data && data.notes !== undefined) {
+      if (data.sentence) {
+        sentenceNotesCache[data.sentence] = data.notes;
+      }
+      currentNotesMarkdown = data.notes;
+      latestWhiteboardMarkdown = data.notes;
+      if (whiteboardContent) {
+        whiteboardContent.innerHTML = renderMarkdownSafe(data.notes);
+        enhanceWhiteboardVocab(whiteboardContent);
+      }
+    }
+  } else if (type === "typing_sync") {
+    if (data && data.source === "portrait") {
+      syncTypingFromPortrait(data);
+    }
+  } else if (type === "typing_completed") {
+    if (data && data.sentence_index) {
+      handleTypingCompletedFromSync(data);
+    }
+  } else if (type === "repeat_rounds_changed") {
+    if (data && data.rounds) {
+      currentTypingRepeatRounds = data.rounds;
+      updateTypingRepeatButton();
+    }
   } else if (type === "portrait_connected") {
-    // When portrait connects, collapse left sidebar to maximize whiteboard & studio
-    if (!isSidebarCollapsed) {
-      setSidebarCollapsed(true, false);
-      showToast("🖥️ 竖屏教材端已连通，主台已自动优化为宽屏黑板模式！");
+    const wasConnected = isPortraitConnected;
+    isPortraitConnected = true;
+    lastPortraitHeartbeat = Date.now();
+    updateVideoSyncStrip();
+    if (!wasConnected) {
+      if (!isSidebarCollapsed) {
+        setSidebarCollapsed(true, false);
+      }
+      showToast("🖥️ 竖屏教材端已连通：视频在竖屏高清置顶播放，打字空间已完全释放！");
+      try {
+        if (latestWhiteboardMarkdown) {
+          syncChannel.postMessage({
+            type: "notes_update",
+            data: { notes: latestWhiteboardMarkdown }
+          });
+        }
+        syncChannel.postMessage({
+          type: "notes_dock_change",
+          data: { dock: currentNotesDock }
+        });
+        syncChannel.postMessage({
+          type: "typing_dock_change",
+          data: { dock: currentTypingDock }
+        });
+        if (isTypingFullscreenActive()) {
+          syncChannel.postMessage({
+            type: "typing_fullscreen_change",
+            data: { active: true }
+          });
+        }
+      } catch (_) {}
+    }
+  } else if (type === "portrait_heartbeat") {
+    isPortraitConnected = true;
+    lastPortraitHeartbeat = Date.now();
+  } else if (type === "portrait_disconnected") {
+    isPortraitConnected = false;
+    updateVideoSyncStrip();
+    showToast("🖥️ 竖屏教材端已断开，已自动切回单屏模式");
+  } else if (type === "sentence_selected_from_portrait" || (type === "sentence_change" && data && data.source === "portrait")) {
+    if (data && data.sentence_index) {
+      const targetIdx = Math.max(1, Math.min(data.sentence_index, lectureSentences.length || 1));
+      if (currentSentenceIndex !== targetIdx || !hasCurrentSentenceVideoPlayed) {
+        currentSentenceIndex = targetIdx;
+        hasCurrentSentenceVideoPlayed = true;
+        updateSentencePreview(false, false);
+      }
+      const td = document.getElementById("typing-target-display");
+      if (td) {
+        setTimeout(() => { try { td.focus(); } catch (_) {} }, 40);
+      }
+    }
+  } else if (type === "play") {
+    const idx = (data && data.sentence_index) || currentSentenceIndex;
+    document.querySelectorAll(`.inline-play-btn[data-index="${idx}"], #typing-original-media-btn, #video-replay-clip-btn, #landscape-sent-play-btn`).forEach(b => b.classList.add("playing"));
+  } else if (type === "pause") {
+    document.querySelectorAll(".inline-play-btn.playing, #typing-original-media-btn.playing, #video-replay-clip-btn.playing, #landscape-sent-play-btn.playing").forEach(b => b.classList.remove("playing"));
+    if (data && data.ended) {
+      if (isContinuousLecture && continuousAction === "read_only") {
+        if (currentSentenceIndex < lectureSentences.length) {
+          setStatus(`第 ${currentSentenceIndex} 句播放完毕，准备下一句…`, "speaking");
+          clearTimeout(continuousTimer);
+          continuousTimer = setTimeout(() => {
+            if (!isContinuousLecture) return;
+            currentSentenceIndex++;
+            updateSentencePreview();
+            playSentenceAudioDirect(currentSentenceIndex);
+            syncChannel.postMessage({
+              type: "continuous_progress",
+              data: { running: true, sentence_index: currentSentenceIndex, total: lectureSentences.length }
+            });
+          }, 600);
+        } else {
+          stopContinuousLecture();
+          showToast("🎉 本页所有句子视频原声播放完成！");
+          syncChannel.postMessage({
+            type: "continuous_progress",
+            data: { running: false, finished: true }
+          });
+        }
+      }
+    }
+  } else if (type === "seek") {
+    const videoEl = document.getElementById("document-video-element");
+    if (videoEl && data && typeof data.time === "number") {
+      try {
+        if (videoEl.readyState >= 1) videoEl.currentTime = data.time;
+        else videoEl.addEventListener("loadedmetadata", () => { videoEl.currentTime = data.time; }, { once: true });
+      } catch (_) {}
+    }
+  } else if (type === "video_mode") {
+    if (data) {
+      currentDocHasMedia = !!data.has_media;
+      currentDocMediaUrl = data.media_url || (currentDocHasMedia ? `/api/documents/${data.document_id || lectureDocumentId}/media` : null);
+      updateVideoSyncStrip();
+    }
+  } else if (type === "loop_mode") {
+    if (data && typeof data.loop === "boolean") {
+      toggleLoopPlayback(data.loop, false);
+    }
+  } else if (type === "video_status") {
+    if (data) {
+      if (data.state === "paused") {
+        document.querySelectorAll(".inline-play-btn.playing, #typing-original-media-btn.playing, #video-replay-clip-btn.playing, #landscape-sent-play-btn.playing").forEach(b => b.classList.remove("playing"));
+        if (data.ended && isContinuousLecture && continuousAction === "read_only") {
+          if (currentSentenceIndex < lectureSentences.length) {
+            setStatus(`第 ${currentSentenceIndex} 句播放完毕，准备下一句…`, "speaking");
+            clearTimeout(continuousTimer);
+            continuousTimer = setTimeout(() => {
+              if (!isContinuousLecture) return;
+              currentSentenceIndex++;
+              updateSentencePreview();
+              playSentenceAudioDirect(currentSentenceIndex);
+              syncChannel.postMessage({
+                type: "continuous_progress",
+                data: { running: true, sentence_index: currentSentenceIndex, total: lectureSentences.length }
+              });
+            }, 600);
+          } else {
+            stopContinuousLecture();
+            showToast("🎉 本页所有句子视频原声播放完成！");
+            syncChannel.postMessage({
+              type: "continuous_progress",
+              data: { running: false, finished: true }
+            });
+          }
+        }
+      } else if (data.state === "playing") {
+        const idx = data.sentence_index || currentSentenceIndex;
+        document.querySelectorAll(`.inline-play-btn[data-index="${idx}"], #typing-original-media-btn, #video-replay-clip-btn, #landscape-sent-play-btn`).forEach(b => b.classList.add("playing"));
+      }
     }
   }
 };
+
+// Check portrait connection liveness
+setInterval(() => {
+  if (isPortraitConnected && Date.now() - lastPortraitHeartbeat > 12000) {
+    isPortraitConnected = false;
+    updateVideoSyncStrip();
+  }
+}, 4000);
 
 // Notes Management
 async function saveCurrentNotes() {
@@ -3489,6 +4290,10 @@ if (typingDisplayEl) {
       pill.className = "typing-status-pill active";
       pill.textContent = typedBuffer.length > 0 ? "跟打中…" : "请开始输入";
     }
+    if (currentDocHasMedia && isVideoAutoplayEnabled && !hasCurrentSentenceVideoPlayed && hasUserInteracted) {
+      hasCurrentSentenceVideoPlayed = true;
+      playSentenceAudioDirect(currentSentenceIndex);
+    }
   });
 
   typingDisplayEl.addEventListener("blur", () => {
@@ -3501,6 +4306,16 @@ if (typingDisplayEl) {
       pill.textContent = typedBuffer.length > 0 ? "跟打暂停 (按 Tab 聚焦)" : "待打字 (按 Tab 聚焦)";
     }
   });
+
+  typingDisplayEl.addEventListener("scroll", () => {
+    if (typingScrollTargetTop !== null && Math.abs(typingDisplayEl.scrollTop - typingScrollTargetTop) < 3) {
+      typingScrollTargetTop = null;
+    }
+  }, { passive: true });
+
+  typingDisplayEl.addEventListener("wheel", () => {
+    typingScrollTargetTop = null;
+  }, { passive: true });
 }
 
 const typingRepeatBtn = document.getElementById("typing-repeat-btn");
@@ -3547,6 +4362,136 @@ if (typingWordTransBtn) {
     showToast(isWordTranslationAudioEnabled ? "中 已开启单词中文释义朗读 (英文读完接读中文)" : "🔇 已关闭单词中文释义朗读");
     if (isWordTranslationAudioEnabled && currentTypingTarget) {
       fetchSentenceWordGlosses(currentTypingTarget);
+    }
+  });
+}
+
+const typingOriginalMediaBtn = document.getElementById("typing-original-media-btn");
+if (typingOriginalMediaBtn) {
+  typingOriginalMediaBtn.addEventListener("click", () => {
+    playSentenceAudioDirect(currentSentenceIndex, typingOriginalMediaBtn);
+  });
+}
+
+const videoAutoplayBtn = document.getElementById("video-autoplay-btn");
+if (videoAutoplayBtn) {
+  videoAutoplayBtn.classList.toggle("active", isVideoAutoplayEnabled);
+  videoAutoplayBtn.addEventListener("click", () => {
+    isVideoAutoplayEnabled = !isVideoAutoplayEnabled;
+    localStorage.setItem("ai_coach_video_autoplay", isVideoAutoplayEnabled ? "true" : "false");
+    videoAutoplayBtn.classList.toggle("active", isVideoAutoplayEnabled);
+    showToast(isVideoAutoplayEnabled ? "▶ 已开启跟打自动播放视频原声片段" : "⏸ 已关闭跟打自动播放视频片段");
+  });
+}
+
+const videoPipBtn = document.getElementById("video-pip-btn");
+if (videoPipBtn) {
+  videoPipBtn.addEventListener("click", async () => {
+    const videoEl = document.getElementById("document-video-element");
+    if (!videoEl) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        videoPipBtn.classList.remove("active");
+        videoPipBtn.textContent = "🔲 悬浮窗";
+      } else if (document.pictureInPictureEnabled && !videoEl.disablePictureInPicture) {
+        const wrapper = document.getElementById("video-viewport-wrapper");
+        const wasCollapsed = wrapper && wrapper.classList.contains("collapsed");
+        if (wasCollapsed) {
+          wrapper.style.height = "1px";
+          wrapper.style.opacity = "0.01";
+        }
+        if (!videoEl.src && currentDocHasMedia) {
+          const documentId = (lectureDocSelect && lectureDocSelect.value) || lectureDocumentId;
+          videoEl.src = currentDocMediaUrl || `/api/documents/${documentId}/media`;
+          videoEl.load();
+        }
+        if (videoEl.readyState < 1) {
+          await new Promise((resolve) => {
+            const onMeta = () => { cleanup(); resolve(); };
+            const timer = setTimeout(() => { cleanup(); resolve(); }, 1500);
+            const cleanup = () => {
+              clearTimeout(timer);
+              videoEl.removeEventListener("loadedmetadata", onMeta);
+              videoEl.removeEventListener("error", onMeta);
+            };
+            videoEl.addEventListener("loadedmetadata", onMeta);
+            videoEl.addEventListener("error", onMeta);
+          });
+        }
+        await videoEl.requestPictureInPicture();
+        if (wasCollapsed) {
+          wrapper.style.height = "";
+          wrapper.style.opacity = "";
+        }
+        videoPipBtn.classList.add("active");
+        videoPipBtn.textContent = "🔲 内嵌";
+      } else {
+        showToast("当前浏览器未开启画中画悬浮窗支持");
+      }
+    } catch (err) {
+      console.warn("PiP error:", err);
+      showToast("无法开启画中画悬浮窗");
+    }
+  });
+
+  const mainVideoEl = document.getElementById("document-video-element");
+  if (mainVideoEl) {
+    mainVideoEl.addEventListener("enterpictureinpicture", () => {
+      videoPipBtn.classList.add("active");
+      videoPipBtn.textContent = "🔲 内嵌";
+    });
+    mainVideoEl.addEventListener("leavepictureinpicture", () => {
+      videoPipBtn.classList.remove("active");
+      videoPipBtn.textContent = "🔲 悬浮窗";
+    });
+  }
+}
+
+const videoReplayClipBtn = document.getElementById("video-replay-clip-btn");
+if (videoReplayClipBtn) {
+  videoReplayClipBtn.addEventListener("click", () => {
+    playSentenceAudioDirect(currentSentenceIndex, videoReplayClipBtn);
+  });
+}
+
+const videoSizeToggleBtn = document.getElementById("video-size-toggle-btn");
+if (videoSizeToggleBtn) {
+  videoSizeToggleBtn.addEventListener("click", () => {
+    const vc = document.getElementById("video-player-container");
+    if (vc) {
+      vc.classList.toggle("expanded");
+      videoSizeToggleBtn.textContent = vc.classList.contains("expanded") ? "📐 紧凑" : "📐 放大";
+    }
+  });
+}
+
+const videoVisibilityToggleBtn = document.getElementById("video-visibility-toggle-btn");
+if (videoVisibilityToggleBtn) {
+  videoVisibilityToggleBtn.addEventListener("click", () => {
+    const wrapper = document.getElementById("video-viewport-wrapper");
+    if (wrapper) {
+      const isCurrentlyCollapsed = wrapper.classList.contains("collapsed");
+      if (isCurrentlyCollapsed) {
+        wrapper.classList.remove("collapsed");
+        wrapper.classList.add("expanded");
+        isLocalVideoForced = true;
+        videoVisibilityToggleBtn.classList.add("active");
+        videoVisibilityToggleBtn.textContent = "▲ 收起视口";
+        showToast("🖥️ 已展开本地视口 (单屏模式)");
+        const videoEl = document.getElementById("document-video-element");
+        if (videoEl && currentDocMediaUrl && (!videoEl.src || !videoEl.src.includes(currentDocMediaUrl))) {
+          videoEl.src = currentDocMediaUrl;
+          videoEl.load();
+        }
+      } else {
+        wrapper.classList.add("collapsed");
+        wrapper.classList.remove("expanded");
+        isLocalVideoForced = false;
+        videoVisibilityToggleBtn.classList.remove("active");
+        videoVisibilityToggleBtn.textContent = "🖥️ 本地视口";
+        showToast("📺 已收起本地视口，维持紧凑同步条");
+      }
     }
   });
 }
@@ -3646,8 +4591,23 @@ function setTypingFullscreen(enable, triggerNative = true) {
     // Auto-focus typing display
     const typingDisplay = document.getElementById("typing-target-display");
     if (typingDisplay) {
-      setTimeout(() => typingDisplay.focus(), 60);
+      setTimeout(() => {
+        typingDisplay.focus();
+        requestScrollTypingTarget();
+      }, 80);
     }
+    try {
+      syncChannel.postMessage({
+        type: "typing_fullscreen_change",
+        data: { active: true }
+      });
+      if (latestWhiteboardMarkdown) {
+        syncChannel.postMessage({
+          type: "notes_update",
+          data: { notes: latestWhiteboardMarkdown }
+        });
+      }
+    } catch (_) {}
     showToast("已进入全屏沉浸跟打模式 (按 Esc 或 F10 退出)");
   } else {
     card.classList.remove("fullscreen-mode");
@@ -3667,8 +4627,17 @@ function setTypingFullscreen(enable, triggerNative = true) {
     // Preserve focus
     const typingDisplay = document.getElementById("typing-target-display");
     if (typingDisplay) {
-      setTimeout(() => typingDisplay.focus(), 60);
+      setTimeout(() => {
+        typingDisplay.focus();
+        requestScrollTypingTarget();
+      }, 80);
     }
+    try {
+      syncChannel.postMessage({
+        type: "typing_fullscreen_change",
+        data: { active: false }
+      });
+    } catch (_) {}
   }
 }
 
@@ -3734,6 +4703,11 @@ function initTypingFullscreen() {
       e.preventDefault();
       setTypingFullscreen(false, true);
     }
+  });
+
+  // Recalculate typing target scroll alignment on window resize
+  window.addEventListener("resize", () => {
+    requestScrollTypingTarget();
   });
 }
 
@@ -4083,10 +5057,13 @@ function setupUrlImport() {
         return;
       }
 
+      const isYt = /(?:youtube\.com|youtu\.be)/i.test(url);
       if (submitBtn) submitBtn.disabled = true;
       if (statusEl) {
         statusEl.style.color = "var(--blue, #38bdf8)";
-        statusEl.textContent = "⏳ 正在抓取正文并排版生成教材，请稍候...";
+        statusEl.textContent = isYt
+          ? "⏳ 正在通过 yt-dlp 抓取 YouTube 英文原声字幕并智能断句排版，请稍候..."
+          : "⏳ 正在抓取正文并排版生成教材，请稍候...";
       }
 
       try {
@@ -4108,7 +5085,10 @@ function setupUrlImport() {
         if (titleInput) titleInput.value = "";
         if (rawTextInput) rawTextInput.value = "";
 
-        showToast(`🎉 网页文章《${data.document.title}》导入成功！已就绪`);
+        const toastMsg = isYt
+          ? `🎉 YouTube 视频《${data.document.title}》字幕教材导入成功！已就绪`
+          : `🎉 网页文章《${data.document.title}》导入成功！已就绪`;
+        showToast(toastMsg);
         await loadLectureDocuments();
         lectureDocSelect.value = data.document.id;
         lecturePage = 1;
@@ -4122,13 +5102,207 @@ function setupUrlImport() {
         });
       } catch (err) {
         console.error("URL import error:", err);
+        const errMsg = err.message || "导入失败";
         if (statusEl) {
           statusEl.style.color = "var(--red, #ef4444)";
-          statusEl.textContent = `❌ 导入失败: ${err.message}`;
+          statusEl.textContent = `❌ 导入失败: ${errMsg}`;
         }
-        showToast(`❌ 导入失败: ${err.message}`);
+        const firstLine = errMsg.split("\n")[0].trim();
+        showToast(`❌ 导入失败: ${firstLine}`);
+        const rawDetails = document.getElementById("url-import-raw-details");
+        if (rawDetails && (errMsg.includes("防机器人") || errMsg.includes("bot") || errMsg.includes("Cookie"))) {
+          rawDetails.open = true;
+          if (rawTextInput) rawTextInput.focus();
+        }
       } finally {
         if (submitBtn) submitBtn.disabled = false;
+      }
+    });
+  }
+}
+
+// AI Custom Practice Generator Modal & Workflow
+function setupAiPracticeModal() {
+  const openBtn = document.getElementById("ai-practice-btn");
+  const fsOpenBtn = document.getElementById("fs-ai-practice-btn");
+  const modal = document.getElementById("ai-practice-modal");
+  const closeBtn = document.getElementById("ai-practice-close-btn");
+  const cancelBtn = document.getElementById("ai-practice-cancel-btn");
+  const form = document.getElementById("ai-practice-form");
+  const promptInput = document.getElementById("ai-practice-prompt-input");
+  const titleInput = document.getElementById("ai-practice-title-input");
+  const statusEl = document.getElementById("ai-practice-status");
+  const submitBtn = document.getElementById("ai-practice-submit-btn");
+  const presetContainer = document.getElementById("ai-practice-preset-container");
+  const countGroup = document.getElementById("ai-practice-count-group");
+  const diffGroup = document.getElementById("ai-practice-diff-group");
+
+  if (!modal) return;
+
+  // Fetch and render presets
+  const renderPresets = async () => {
+    if (!presetContainer || presetContainer.children.length > 0) return;
+    try {
+      const res = await fetch("/api/ai-practice/presets");
+      const data = await res.json();
+      if (data && data.presets && Array.isArray(data.presets)) {
+        presetContainer.innerHTML = "";
+        data.presets.forEach(p => {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "preset-chip";
+          chip.innerHTML = `<span>${escapeHtml(p.icon)}</span> <span>${escapeHtml(p.label)}</span>`;
+          chip.title = p.prompt;
+          chip.addEventListener("click", () => {
+            if (promptInput) {
+              promptInput.value = p.prompt;
+              promptInput.focus();
+            }
+            // Sync difficulty if defined
+            if (p.default_difficulty && diffGroup) {
+              const targetRadio = diffGroup.querySelector(`input[value="${p.default_difficulty}"]`);
+              if (targetRadio) {
+                targetRadio.checked = true;
+                diffGroup.querySelectorAll(".radio-chip").forEach(c => c.classList.remove("active"));
+                targetRadio.closest(".radio-chip")?.classList.add("active");
+              }
+            }
+            // Sync count if defined
+            if (p.default_count && countGroup) {
+              const targetRadio = countGroup.querySelector(`input[value="${p.default_count}"]`);
+              if (targetRadio) {
+                targetRadio.checked = true;
+                countGroup.querySelectorAll(".radio-chip").forEach(c => c.classList.remove("active"));
+                targetRadio.closest(".radio-chip")?.classList.add("active");
+              }
+            }
+          });
+          presetContainer.appendChild(chip);
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to load AI practice presets:", e);
+    }
+  };
+
+  // Radio chips toggle behavior
+  const setupRadioChips = (container) => {
+    if (!container) return;
+    const chips = container.querySelectorAll(".radio-chip");
+    chips.forEach(chip => {
+      const radio = chip.querySelector("input[type='radio']");
+      if (radio) {
+        chip.addEventListener("click", () => {
+          chips.forEach(c => c.classList.remove("active"));
+          chip.classList.add("active");
+          radio.checked = true;
+        });
+      }
+    });
+  };
+  setupRadioChips(countGroup);
+  setupRadioChips(diffGroup);
+
+  const openModal = () => {
+    modal.style.display = "flex";
+    if (statusEl) statusEl.textContent = "";
+    renderPresets();
+    if (promptInput) {
+      setTimeout(() => {
+        promptInput.focus();
+        promptInput.select();
+      }, 50);
+    }
+  };
+
+  const closeModal = () => {
+    modal.style.display = "none";
+    if (statusEl) statusEl.textContent = "";
+  };
+
+  if (openBtn) openBtn.addEventListener("click", openModal);
+  if (fsOpenBtn) fsOpenBtn.addEventListener("click", openModal);
+  if (closeBtn) closeBtn.addEventListener("click", closeModal);
+  if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
+
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) closeModal();
+  });
+
+  if (form) {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const prompt = promptInput ? promptInput.value.trim() : "";
+      const customTitle = titleInput ? titleInput.value.trim() : "";
+
+      const checkedCount = countGroup ? countGroup.querySelector("input[type='radio']:checked") : null;
+      const count = checkedCount ? parseInt(checkedCount.value, 10) : 8;
+
+      const checkedDiff = diffGroup ? diffGroup.querySelector("input[type='radio']:checked") : null;
+      const difficulty = checkedDiff ? checkedDiff.value : "intermediate";
+
+      if (!prompt) {
+        if (statusEl) {
+          statusEl.style.color = "var(--red, #ef4444)";
+          statusEl.textContent = "⚠️ 请输入您想要练习的主题、语法点或应用场景（也可直接点击上方预设灵感）";
+        }
+        if (promptInput) promptInput.focus();
+        return;
+      }
+
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.style.opacity = "0.7";
+      }
+      if (statusEl) {
+        statusEl.style.color = "var(--blue, #38bdf8)";
+        statusEl.textContent = "🤖 本地大模型正在构思高品质专属例句与语法考点，请稍候...";
+      }
+
+      try {
+        const res = await fetch("/api/ai-practice/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: prompt,
+            count: count,
+            difficulty: difficulty,
+            title: customTitle || null,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "生成练习失败");
+
+        closeModal();
+        if (promptInput) promptInput.value = "";
+        if (titleInput) titleInput.value = "";
+
+        showToast(`🎉 AI 定制练习《${data.title}》已生成！共 ${data.sentences ? data.sentences.length : count} 句`);
+        await loadLectureDocuments();
+        await switchDocument(data.document.id, 1, 1);
+
+        // Pre-focus typing display so user can type immediately
+        const typingDisplay = document.getElementById("typing-target-display");
+        if (typingDisplay) {
+          setTimeout(() => typingDisplay.focus(), 150);
+        }
+
+        syncChannel.postMessage({
+          type: "document_uploaded",
+          data: { id: data.document.id, title: data.document.title },
+        });
+      } catch (err) {
+        console.error("AI practice generation error:", err);
+        if (statusEl) {
+          statusEl.style.color = "var(--red, #ef4444)";
+          statusEl.textContent = `❌ ${err.message}`;
+        }
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.style.opacity = "1";
+        }
       }
     });
   }
@@ -4186,6 +5360,14 @@ window.addEventListener("keydown", (e) => {
     replayCurrentSentenceAudio();
     return;
   }
+  // Alt+V: Play current sentence video clip (global)
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "v" || e.key === "V" || e.code === "KeyV")) {
+    e.preventDefault();
+    const origBtn = document.getElementById("typing-original-media-btn") || document.getElementById("video-replay-clip-btn");
+    playSentenceAudioDirect(currentSentenceIndex, origBtn);
+    showToast(currentDocHasMedia ? "🎬 播放视频原声片段 (Alt+V)" : "🔊 播放原句读音 (Alt+V)");
+    return;
+  }
   // Alt+L: Toggle single sentence loop playback (global)
   if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "l" || e.key === "L" || e.code === "KeyL")) {
     e.preventDefault();
@@ -4195,6 +5377,18 @@ window.addEventListener("keydown", (e) => {
 }, true);
 
 // Notes actions
+if (generateNotesBtn) {
+  generateNotesBtn.addEventListener("click", () => {
+    const s = (typeof lectureSentences !== "undefined" && lectureSentences && currentSentenceIndex) ? lectureSentences[currentSentenceIndex - 1] : null;
+    const text = s ? s.text : "";
+    if (!text) {
+      showToast("请先选择或载入句子");
+      return;
+    }
+    const trans = sentenceTranslations[text] || (s ? s.translation : "") || "";
+    fetchSentenceSmartNotes(text, trans, true);
+  });
+}
 saveNotesBtn.addEventListener("click", saveCurrentNotes);
 copyNotesBtn.addEventListener("click", copyCurrentNotes);
 exportNotesBtn.addEventListener("click", exportNotes);
@@ -4237,7 +5431,7 @@ notesModal.addEventListener("click", (e) => {
   if (e.target === notesModal) closeNotesModal();
 });
 
-lectureLoadBtn.addEventListener("click", () => loadLecturePage(lecturePageInput.value));
+lectureLoadBtn.addEventListener("click", () => loadLecturePage(lecturePageInput.value, 1));
 lecturePrevBtn.addEventListener("click", () => navigatePage(-1));
 lectureNextBtn.addEventListener("click", () => navigatePage(1));
 lectureExplainBtn.addEventListener("click", () => requestLectureAction("explain"));
@@ -4247,8 +5441,9 @@ lectureExitBtn.addEventListener("click", () => {
     ws.send(JSON.stringify({ type: "clear_lecture_context" }));
   }
 });
-lectureDocSelect.addEventListener("change", async () => {
-  const docId = lectureDocSelect.value;
+async function switchDocument(docId, targetPage = null, targetSentence = null) {
+  if (!docId) return;
+  if (lectureDocSelect) lectureDocSelect.value = docId;
   if (docId === "west_civ") {
     setTeachingStyle("history");
   }
@@ -4256,39 +5451,45 @@ lectureDocSelect.addEventListener("change", async () => {
   const localSavedPage = parseInt(localStorage.getItem(`ai_coach_page_${docId}`), 10);
   const localSavedSent = parseInt(localStorage.getItem(`ai_coach_sent_${docId}`), 10);
 
-  let targetPage = null;
-  let targetSentence = null;
-  if (Number.isInteger(localSavedPage) && localSavedPage >= 1) {
-    targetPage = localSavedPage;
-  }
-  if (Number.isInteger(localSavedSent) && localSavedSent >= 1) {
-    targetSentence = localSavedSent;
+  if (targetPage === null || targetPage === undefined) {
+    if (Number.isInteger(localSavedPage) && localSavedPage >= 1) {
+      targetPage = localSavedPage;
+    } else if (learningProgress && learningProgress.books && learningProgress.books[docId]) {
+      targetPage = learningProgress.books[docId].last_page;
+    }
+    if (!targetPage) {
+      targetPage = docId === "west_civ" ? 38 : (docId === "vocabulary" || docId === "grammar" ? 9 : 1);
+    }
   }
 
-  if (!targetPage && learningProgress && learningProgress.books && learningProgress.books[docId]) {
-    targetPage = learningProgress.books[docId].last_page;
-    targetSentence = targetSentence || learningProgress.books[docId].last_sentence_index;
-  }
-  if (!targetPage) {
-    targetPage = docId === "west_civ" ? 38 : (docId === "vocabulary" || docId === "grammar" ? 9 : 1);
-  }
-  if (!targetSentence) {
-    targetSentence = 1;
+  if (targetSentence === null || targetSentence === undefined) {
+    if (Number.isInteger(localSavedSent) && localSavedSent >= 1) {
+      targetSentence = localSavedSent;
+    } else if (learningProgress && learningProgress.books && learningProgress.books[docId]) {
+      targetSentence = learningProgress.books[docId].last_sentence_index;
+    }
+    if (!targetSentence) {
+      targetSentence = 1;
+    }
   }
 
   lecturePage = targetPage;
-  lecturePageInput.value = targetPage;
+  if (lecturePageInput) lecturePageInput.value = targetPage;
   lectureTotalPages = 0;
   await loadLectureUnits(docId);
   const currentUnit = [...lectureUnits].reverse().find(unit => unit.page <= targetPage);
-  lectureUnitSelect.value = currentUnit ? String(currentUnit.page) : "";
+  if (lectureUnitSelect) lectureUnitSelect.value = currentUnit ? String(currentUnit.page) : "";
   await loadLecturePage(targetPage, targetSentence);
+}
+
+lectureDocSelect.addEventListener("change", async () => {
+  await switchDocument(lectureDocSelect.value);
 });
 lectureUnitSelect.addEventListener("change", () => {
-  if (lectureUnitSelect.value) loadLecturePage(lectureUnitSelect.value);
+  if (lectureUnitSelect.value) loadLecturePage(lectureUnitSelect.value, 1);
 });
 lecturePageInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") loadLecturePage(lecturePageInput.value);
+  if (event.key === "Enter") loadLecturePage(lecturePageInput.value, 1);
 });
 
 // Populate voices dynamically
@@ -5308,6 +6509,344 @@ function initSelectBlurOnChoice() {
   });
 }
 
+function initModelStatusListener() {
+  window.addEventListener("model-status-updated", (evt) => {
+    const modelState = evt.detail;
+    if (!modelState) return;
+    const select = document.getElementById("local-model-select");
+    if (select && modelState.active && select.value !== modelState.active && !modelState.busy) {
+      select.value = modelState.active;
+    }
+  });
+}
+
+// =========================================================================
+// Modular Panel Layout & Multi-Screen Docking Manager
+// =========================================================================
+let currentTypingDock = localStorage.getItem("english_coach_typing_dock") || "landscape";
+let currentNotesDock = localStorage.getItem("english_coach_notes_dock") || "landscape";
+let isNotesCollapsed = localStorage.getItem("english_coach_notes_collapsed") === "1";
+
+function setTypingDock(dock, broadcast = true) {
+  currentTypingDock = dock;
+  localStorage.setItem("english_coach_typing_dock", dock);
+
+  const card = document.getElementById("shadow-typing-card");
+  const notice = document.getElementById("typing-docked-notice");
+  const dockBtn = document.getElementById("typing-dock-btn");
+  const chipLandscape = document.getElementById("chip-dock-landscape");
+  const chipPortrait = document.getElementById("chip-dock-portrait");
+
+  const isPortrait = (dock === "portrait");
+
+  if (card) {
+    card.classList.toggle("docked-to-portrait", isPortrait);
+  }
+  if (notice) {
+    notice.style.display = isPortrait ? "flex" : "none";
+  }
+  if (dockBtn) {
+    dockBtn.textContent = isPortrait ? "🖥️ 移回横屏" : "📱 移至竖屏";
+    dockBtn.title = isPortrait ? "将跟打练习区移回当前横屏窗口" : "将跟打练习区移至竖屏模式 (DP-1 9:16)";
+    dockBtn.classList.toggle("docked-active", isPortrait);
+  }
+  if (chipLandscape && chipPortrait) {
+    chipLandscape.classList.toggle("active", !isPortrait);
+    chipPortrait.classList.toggle("active", isPortrait);
+    const radioLand = chipLandscape.querySelector("input");
+    const radioPort = chipPortrait.querySelector("input");
+    if (radioLand) radioLand.checked = !isPortrait;
+    if (radioPort) radioPort.checked = isPortrait;
+  }
+
+  const sentTag = document.getElementById("docked-tag-sentence");
+  if (sentTag) {
+    sentTag.textContent = `当前第 ${currentSentenceIndex || 1} 句`;
+  }
+
+  if (broadcast) {
+    try {
+      syncChannel.postMessage({
+        type: "typing_dock_change",
+        data: { dock }
+      });
+    } catch (_) {}
+    showToast(isPortrait ? "📱 跟打区域已移至竖屏模式，双屏数据实时同步！" : "🖥️ 跟打区域已移回横屏主台！");
+  }
+}
+
+function setNotesDock(dock, broadcast = true) {
+  currentNotesDock = dock;
+  localStorage.setItem("english_coach_notes_dock", dock);
+
+  const isPortrait = (dock === "portrait");
+  const notesDockBtn = document.getElementById("notes-dock-btn");
+  const chipLandscape = document.getElementById("chip-notes-dock-landscape");
+  const chipPortrait = document.getElementById("chip-notes-dock-portrait");
+  const expandNotesTab = document.getElementById("expand-notes-tab");
+
+  if (notesDockBtn) {
+    notesDockBtn.textContent = isPortrait ? "🖥️ 移回横屏" : "📱 移至竖屏";
+    notesDockBtn.title = isPortrait ? "将智能板书移回当前横屏主台" : "将智能板书移至竖屏模式 (DP-1 9:16)";
+    notesDockBtn.classList.toggle("docked-active", isPortrait);
+  }
+
+  if (chipLandscape && chipPortrait) {
+    chipLandscape.classList.toggle("active", !isPortrait);
+    chipPortrait.classList.toggle("active", isPortrait);
+    const radioLand = chipLandscape.querySelector("input");
+    const radioPort = chipPortrait.querySelector("input");
+    if (radioLand) radioLand.checked = !isPortrait;
+    if (radioPort) radioPort.checked = isPortrait;
+  }
+
+  if (expandNotesTab) {
+    expandNotesTab.textContent = isPortrait ? "❮ 板书在竖屏 📱" : "❮ 展开板书 📝";
+    expandNotesTab.title = isPortrait ? "当前板书已停靠在竖屏实时呈现 (点击可展开横屏板书)" : "展开右侧智能板书";
+  }
+
+  if (isPortrait) {
+    setNotesCollapsed(true, false);
+  } else {
+    setNotesCollapsed(false, false);
+  }
+
+  if (broadcast) {
+    try {
+      syncChannel.postMessage({
+        type: "notes_dock_change",
+        data: { dock }
+      });
+      syncChannel.postMessage({
+        type: "notes_update",
+        data: { notes: latestWhiteboardMarkdown || "" }
+      });
+    } catch (_) {}
+    showToast(isPortrait ? "📱 智能板书已移至竖屏展示，横屏右栏已自动收起！" : "🖥️ 智能板书已移回横屏主台！");
+  }
+}
+
+function setNotesCollapsed(collapsed, notify = false) {
+  isNotesCollapsed = !!collapsed;
+  localStorage.setItem("english_coach_notes_collapsed", isNotesCollapsed ? "1" : "0");
+  if (workspaceContainer) {
+    workspaceContainer.classList.toggle("notes-collapsed", isNotesCollapsed);
+  }
+  const notesToggleBtn = document.getElementById("notes-toggle-btn");
+  if (notesToggleBtn) {
+    notesToggleBtn.textContent = isNotesCollapsed ? "◀ 展开板书" : "▶ 折叠板书";
+    notesToggleBtn.title = isNotesCollapsed ? "展开右侧智能板书栏" : "收起右侧智能板书栏 (享受更宽对话流)";
+  }
+  const expandNotesTab = document.getElementById("expand-notes-tab");
+  if (expandNotesTab) {
+    expandNotesTab.style.display = isNotesCollapsed ? "flex" : "none";
+  }
+
+  const chipShow = document.getElementById("chip-notes-show");
+  const chipHide = document.getElementById("chip-notes-hide");
+  if (chipShow && chipHide) {
+    chipShow.classList.toggle("active", !isNotesCollapsed);
+    chipHide.classList.toggle("active", isNotesCollapsed);
+    const rShow = chipShow.querySelector("input");
+    const rHide = chipHide.querySelector("input");
+    if (rShow) rShow.checked = !isNotesCollapsed;
+    if (rHide) rHide.checked = isNotesCollapsed;
+  }
+
+  if (notify) {
+    showToast(isNotesCollapsed ? "已收起智能板书栏" : "已展开智能板书栏 📝");
+  }
+}
+
+function syncTypingFromPortrait(data) {
+  if (!data) return;
+  const sentTag = document.getElementById("docked-tag-sentence");
+  if (sentTag && data.sentence_index) {
+    sentTag.textContent = `当前第 ${data.sentence_index} 句`;
+  }
+  const comboBadge = document.getElementById("typing-combo-badge");
+  if (comboBadge && data.combo !== undefined) {
+    comboBadge.textContent = `Combo x${data.combo} 🔥`;
+    comboBadge.className = data.combo >= 10 ? "typing-combo-badge super" : (data.combo >= 3 ? "typing-combo-badge active" : "typing-combo-badge");
+  }
+  const wpmBadge = document.getElementById("typing-wpm-badge");
+  if (wpmBadge && data.wpm !== undefined) {
+    wpmBadge.textContent = `${data.wpm} WPM`;
+  }
+  const display = document.getElementById("typing-target-display");
+  if (display && data.target && data.typed !== undefined) {
+    const target = data.target;
+    const typed = data.typed;
+    display.innerHTML = target.split("").map((ch, idx) => {
+      let cls = "char-pending";
+      if (idx < typed.length) {
+        cls = areTypingCharsEqual(typed[idx], ch) ? "char-correct" : "char-wrong";
+      } else if (idx === typed.length) {
+        cls = "char-current";
+      }
+      return `<span class="${cls}" data-idx="${idx}">${escapeHtml(ch)}</span>`;
+    }).join("");
+  }
+  if (data.completed) {
+    const card = document.getElementById("shadow-typing-card");
+    if (card) card.classList.add("completed");
+    const pill = document.getElementById("typing-status-pill");
+    if (pill) {
+      pill.className = "typing-status-pill success";
+      pill.textContent = "✓ 竖屏跟打通关！";
+    }
+  }
+}
+
+function handleTypingCompletedFromSync(data) {
+  if (isTypingCompleted) return;
+  isTypingCompleted = true;
+  const card = document.getElementById("shadow-typing-card");
+  if (card) card.classList.add("completed");
+  const pill = document.getElementById("typing-status-pill");
+  if (pill) {
+    pill.className = "typing-status-pill success";
+    pill.textContent = "✓ 竖屏跟打达成！";
+  }
+  SoundEngine.playSuccessChime();
+  ConfettiEngine.fireConfetti();
+  showToast("🎉 太棒了！竖屏跟打拼写 100% 正确！");
+  if (window.OdometerEngine) window.OdometerEngine.flush();
+
+  if (isContinuousLecture) {
+    setStatus("拼写完成！准备进入下一句…", "speaking");
+    setTimeout(() => {
+      if (!isContinuousLecture) return;
+      if (currentSentenceIndex < lectureSentences.length) {
+        currentSentenceIndex++;
+        updateSentencePreview();
+        const nextSent = lectureSentences[currentSentenceIndex - 1];
+        const activeAction = getEffectiveActionMode();
+        triggerSentenceAction(currentSentenceIndex, nextSent ? nextSent.text : "", activeAction);
+      } else {
+        stopContinuousLecture();
+        showToast("🎉 本页所有句子已完成练习！");
+      }
+    }, 1400);
+  }
+}
+
+function applyLayoutPreset(preset) {
+  if (preset === "dual_screen") {
+    setTypingDock("portrait", true);
+    setNotesDock("landscape", true);
+    setSidebarCollapsed(true, false);
+    setNotesCollapsed(false, false);
+    showToast("🚀 已切换为「双屏极致分工」：竖屏打字跟打，横屏宽屏对话与板书！");
+  } else if (preset === "standard") {
+    setTypingDock("landscape", true);
+    setNotesDock("landscape", true);
+    setSidebarCollapsed(false, false);
+    setNotesCollapsed(false, false);
+    showToast("🖥️ 已切换为「标准全能单屏」经典布局");
+  } else if (preset === "focus_typing") {
+    setTypingDock("landscape", true);
+    setNotesDock("landscape", true);
+    setSidebarCollapsed(true, false);
+    setNotesCollapsed(true, false);
+    showToast("⌨️ 已切换为「沉浸跟打大屏」模式");
+  }
+}
+
+function initPanelLayoutManager() {
+  const layoutBtn = document.getElementById("layout-manager-btn");
+  const menuLayoutBtn = document.getElementById("menu-layout-btn");
+  const modal = document.getElementById("layout-manager-modal");
+  const closeBtn = document.getElementById("layout-modal-close-btn");
+  const typingDockBtn = document.getElementById("typing-dock-btn");
+  const typingUndockBtn = document.getElementById("typing-undock-btn");
+  const notesDockBtn = document.getElementById("notes-dock-btn");
+  const notesToggleBtn = document.getElementById("notes-toggle-btn");
+  const expandNotesTab = document.getElementById("expand-notes-tab");
+
+  const showModal = () => {
+    if (modal) modal.style.display = "flex";
+    if (headerMenuPopover) headerMenuPopover.style.display = "none";
+  };
+  const hideModal = () => {
+    if (modal) modal.style.display = "none";
+  };
+
+  if (layoutBtn) layoutBtn.addEventListener("click", showModal);
+  if (menuLayoutBtn) menuLayoutBtn.addEventListener("click", showModal);
+  if (closeBtn) closeBtn.addEventListener("click", hideModal);
+  if (modal) {
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) hideModal();
+    });
+  }
+
+  if (typingDockBtn) {
+    typingDockBtn.addEventListener("click", () => {
+      const next = (currentTypingDock === "portrait") ? "landscape" : "portrait";
+      setTypingDock(next, true);
+    });
+  }
+  if (typingUndockBtn) {
+    typingUndockBtn.addEventListener("click", () => {
+      setTypingDock("landscape", true);
+    });
+  }
+
+  if (notesDockBtn) {
+    notesDockBtn.addEventListener("click", () => {
+      const next = (currentNotesDock === "portrait") ? "landscape" : "portrait";
+      setNotesDock(next, true);
+    });
+  }
+
+  if (notesToggleBtn) {
+    notesToggleBtn.addEventListener("click", () => {
+      setNotesCollapsed(!isNotesCollapsed, true);
+    });
+  }
+  if (expandNotesTab) {
+    expandNotesTab.addEventListener("click", () => {
+      setNotesCollapsed(false, true);
+    });
+  }
+
+  // Presets
+  const pDual = document.getElementById("preset-dual-screen");
+  const pStd = document.getElementById("preset-standard");
+  const pFocus = document.getElementById("preset-focus-typing");
+
+  if (pDual) pDual.addEventListener("click", () => applyLayoutPreset("dual_screen"));
+  if (pStd) pStd.addEventListener("click", () => applyLayoutPreset("standard"));
+  if (pFocus) pFocus.addEventListener("click", () => applyLayoutPreset("focus_typing"));
+
+  // Radio chips
+  const chipLand = document.getElementById("chip-dock-landscape");
+  const chipPort = document.getElementById("chip-dock-portrait");
+  if (chipLand) chipLand.addEventListener("click", () => setTypingDock("landscape", true));
+  if (chipPort) chipPort.addEventListener("click", () => setTypingDock("portrait", true));
+
+  const chipNotesLand = document.getElementById("chip-notes-dock-landscape");
+  const chipNotesPort = document.getElementById("chip-notes-dock-portrait");
+  if (chipNotesLand) chipNotesLand.addEventListener("click", () => setNotesDock("landscape", true));
+  if (chipNotesPort) chipNotesPort.addEventListener("click", () => setNotesDock("portrait", true));
+
+  const chipSideShow = document.getElementById("chip-sidebar-show");
+  const chipSideHide = document.getElementById("chip-sidebar-hide");
+  if (chipSideShow) chipSideShow.addEventListener("click", () => setSidebarCollapsed(false, true));
+  if (chipSideHide) chipSideHide.addEventListener("click", () => setSidebarCollapsed(true, true));
+
+  const chipNoteShow = document.getElementById("chip-notes-show");
+  const chipNoteHide = document.getElementById("chip-notes-hide");
+  if (chipNoteShow) chipNoteShow.addEventListener("click", () => setNotesCollapsed(false, true));
+  if (chipNoteHide) chipNoteHide.addEventListener("click", () => setNotesCollapsed(true, true));
+
+  // Initialize saved states
+  setTypingDock(currentTypingDock, false);
+  setNotesDock(currentNotesDock, false);
+  setNotesCollapsed(isNotesCollapsed, false);
+}
+
 // Start app
 loadVoices();
 setupHeaderSettings();
@@ -5316,9 +6855,11 @@ loadLectureDocuments();
 connectWs();
 setupDocumentUpload();
 setupUrlImport();
+setupAiPracticeModal();
 initThemeToggle();
 initResizableLayout();
 initSidebarCollapse();
+initPanelLayoutManager();
 setupMainImageViewer();
 refreshGameStatus();
 initGamificationModal();
@@ -5327,3 +6868,4 @@ initHeaderProgressClickHandlers();
 updateHeaderProgress();
 initTypingFullscreen();
 initSelectBlurOnChoice();
+initModelStatusListener();

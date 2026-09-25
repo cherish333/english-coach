@@ -21,19 +21,22 @@ data/logs/*
 # Sensitive environment configuration
 .env
 .env.local
+*cookies*.txt
+data/*cookies*.txt
 
 # Local model weights (Download via `bash scripts/download_models.sh`)
 models/*
 !models/.gitkeep
 
-# Large copyrighted books and user custom uploads
-data/books/*.pdf
+# Large copyrighted books, user custom uploads & media
+data/books/*
 !data/books/.gitkeep
-data/custom_books/*.pdf
-data/custom_books/catalog.json
+data/custom_books/*
 !data/custom_books/.gitkeep
 data/custom_pdfs/
 data/custom_docs.json
+data/media/*
+!data/media/.gitkeep
 
 # Persistent local databases & user runtime states
 data/*.db

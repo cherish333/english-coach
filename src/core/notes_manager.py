@@ -267,7 +267,9 @@ class NotesManager:
             # 1. Stash fenced code blocks before inline backticks to preserve syntax tree formatting
             blocks = []
             def stash_fenced_code(match):
-                code_content = match.group(1).strip('\r\n')
+                code_content = match.group(1).rstrip('\r\n')
+                import textwrap
+                code_content = textwrap.dedent(code_content)
                 code_content_html = code_content.replace('\r\n', '<br>').replace('\n', '<br>')
                 idx = len(blocks)
                 blocks.append(
@@ -277,7 +279,7 @@ class NotesManager:
                 )
                 return f"__FENCED_CODE_BLOCK_{idx}__"
 
-            h = re.sub(r'```(?:[a-zA-Z0-9_-]+)?\s*[\r\n]+(.*?)[\r\n]+```', stash_fenced_code, h, flags=re.DOTALL)
+            h = re.sub(r'[ \t]*```(?:[a-zA-Z0-9_-]+)?[ \t]*\r?\n(.*?)(?:\r?\n[ \t]*```|[ \t]*```)[ \t]*', stash_fenced_code, h, flags=re.DOTALL)
             h = re.sub(r'###\s+(.*?)(?:\n|$)', r'<h4 style="color:#4f46e5; margin:10px 0 4px 0;">\1</h4>', h)
             h = re.sub(r'##\s+(.*?)(?:\n|$)', r'<h3 style="color:#1e293b; margin:12px 0 6px 0;">\1</h3>', h)
             h = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', h)

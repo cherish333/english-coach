@@ -4,9 +4,11 @@ structured, paginated PDF documents for the textbook/sentence player.
 """
 
 import html
+import ipaddress
 from pathlib import Path
 import re
-from typing import Optional
+import socket
+from typing import Optional, Union
 from urllib.parse import urlparse
 
 import httpx
@@ -17,6 +19,8 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/130.0.0.0 Safari/537.36 EnglishCoach/1.0"
 )
+
+_SHARED_CARRIER_NAT = ipaddress.ip_network("100.64.0.0/10")
 
 
 def normalize_typography(text: str) -> str:
@@ -40,10 +44,75 @@ def normalize_typography(text: str) -> str:
     return re.sub(r"[ \t]+", " ", text).strip()
 
 
+def _is_prohibited_ip(ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_unspecified
+        or ip.is_multicast
+        or (isinstance(ip, ipaddress.IPv4Address) and ip in _SHARED_CARRIER_NAT)
+    )
+
+
+def is_ssrf_blocked_host(hostname: str) -> bool:
+    """Check whether a hostname or IP points to loopback, private network, link-local, or reserved address."""
+    if not hostname:
+        return True
+    hostname = hostname.strip().lower().strip("[]")
+    if hostname in ("localhost", "0.0.0.0", "::1", "::"):
+        return True
+    if hostname.startswith("127.") or hostname.endswith(".local") or hostname.endswith(".internal"):
+        return True
+
+    try:
+        ip = ipaddress.ip_address(hostname)
+        return _is_prohibited_ip(ip)
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+        for _, _, _, _, sockaddr in infos:
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+                if _is_prohibited_ip(ip):
+                    return True
+            except ValueError:
+                pass
+    except Exception:
+        pass
+
+    return False
+
+
+def validate_url_ssrf(url: str):
+    """Validate that URL does not point to prohibited loopback or private network addresses."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("安全限制：仅支持 HTTP 或 HTTPS 协议。")
+    hostname = (parsed.hostname or "").lower()
+    if not hostname or is_ssrf_blocked_host(hostname):
+        raise ValueError("安全限制：禁止导入本地回环地址或局域网私有IP地址 (Localhost/Private IP)。")
+
+
 async def fetch_web_page(url: str, timeout: float = 15.0) -> str:
-    """Fetch raw HTML of a web page using httpx."""
+    """Fetch raw HTML of a web page using httpx with SSRF validation across redirects."""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+
+    validate_url_ssrf(url)
+
+    async def check_redirect(response: httpx.Response):
+        if response.is_redirect:
+            location = response.headers.get("Location")
+            if location:
+                redirect_url = str(response.url.join(location))
+                validate_url_ssrf(redirect_url)
 
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
@@ -51,13 +120,18 @@ async def fetch_web_page(url: str, timeout: float = 15.0) -> str:
         "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
     }
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            event_hooks={"response": [check_redirect]}
+        ) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code >= 400:
                 raise ValueError(f"无法访问该网页，服务器返回 HTTP 状态码: {resp.status_code}")
             return resp.text
     except httpx.RequestError as exc:
         raise ValueError(f"网络连接失败，请检查网址或网络环境: {exc}")
+
 
 
 def clean_html_article(raw_html: str, fallback_url: str = "") -> tuple[str, list[str]]:
@@ -176,11 +250,27 @@ def clean_html_article(raw_html: str, fallback_url: str = "") -> tuple[str, list
     return title, paragraphs
 
 
+def sanitize_cjk_pdf_text(text: str) -> str:
+    """Sanitize text for PyMuPDF CJK CID fonts (e.g. china-s).
+    PyMuPDF built-in CID fonts only support Basic Multilingual Plane (BMP)
+    characters. Emojis and astral symbols (> U+FFFF) or surrogates cause
+    CID byte shifts that turn Chinese characters into mojibake.
+    """
+    if not text:
+        return ""
+    text = re.sub(r"[\U00010000-\U0010FFFF]", "", text)
+    text = re.sub(r"[\uD800-\uDFFF]", "", text)
+    text = re.sub(r"[\u2600-\u27BF\uE000-\uF8FF]", "", text)
+    return text.strip()
+
+
 def build_article_pdf(title: str, paragraphs: list[str], url: str = "") -> tuple[bytes, int]:
     """Generate a clean, readable A4 PDF from article paragraphs.
     Formats pages into comfortable learning chunks (~180-260 words per page).
     Returns (pdf_bytes, page_count).
     """
+    title = sanitize_cjk_pdf_text(title) or "Article"
+    paragraphs = [sanitize_cjk_pdf_text(p) for p in paragraphs if sanitize_cjk_pdf_text(p)]
     doc = pymupdf.open()
     width, height = 595, 842  # Standard A4
     margin_x = 50
@@ -196,7 +286,7 @@ def build_article_pdf(title: str, paragraphs: list[str], url: str = "") -> tuple
     for p in paragraphs:
         w_count = len(p.split())
         # Break into next page if current page has sufficient content
-        if current_words + w_count > 240 and len(current_page) >= 2:
+        if current_words + w_count > 240 and len(current_page) >= 1:
             pages_data.append(current_page)
             current_page = [p]
             current_words = w_count
@@ -230,10 +320,11 @@ def build_article_pdf(title: str, paragraphs: list[str], url: str = "") -> tuple
 
         y = margin_top
 
-        # Page Title
+        # Page Title (supports CJK font when Chinese characters present)
         if page_idx == 1:
+            title_font = "china-s" if re.search(r"[\u4e00-\u9fa5]", title) else "helv"
             title_rect = pymupdf.Rect(margin_x, y, width - margin_x, y + 42)
-            page.insert_textbox(title_rect, title, fontname="helv", fontsize=15)
+            page.insert_textbox(title_rect, title, fontname=title_font, fontsize=15)
             y += 40
             page.draw_line(
                 pymupdf.Point(margin_x, y),
@@ -244,10 +335,11 @@ def build_article_pdf(title: str, paragraphs: list[str], url: str = "") -> tuple
             y += 18
         else:
             running_title = title[:65] + ("..." if len(title) > 65 else "")
+            running_font = "china-s" if re.search(r"[\u4e00-\u9fa5]", running_title) else "helv"
             page.insert_textbox(
                 pymupdf.Rect(margin_x, y, width - margin_x, y + 15),
                 running_title,
-                fontname="helv",
+                fontname=running_font,
                 fontsize=8,
                 color=(0.5, 0.5, 0.5),
             )
@@ -267,7 +359,8 @@ def build_article_pdf(title: str, paragraphs: list[str], url: str = "") -> tuple
             target_rect = pymupdf.Rect(
                 margin_x, y, width - margin_x, min(max_y, y + p_h + 10)
             )
-            page.insert_textbox(target_rect, p, fontname="helv", fontsize=11)
+            p_font = "china-s" if re.search(r"[\u4e00-\u9fa5]", p) else "helv"
+            page.insert_textbox(target_rect, p, fontname=p_font, fontsize=11)
             y += p_h
             if y > max_y - 25:
                 break
@@ -305,16 +398,40 @@ async def process_web_or_text_import(
     if not url and not raw_text:
         raise ValueError("请提供网页网址 (URL) 或直接粘贴文章内容。")
 
+    if url and not raw_text:
+        from src.core.youtube_importer import is_youtube_url, process_youtube_import
+        if is_youtube_url(url):
+            return await process_youtube_import(url=url, custom_title=custom_title)
+
     if raw_text:
-        title = custom_title or (raw_text.splitlines()[0][:60] if raw_text else "Pasted Article")
-        title = normalize_typography(title)
-        # Split into paragraphs
-        raw_paras = [p.strip() for p in re.split(r"\n\s*\n", raw_text) if p.strip()]
-        paragraphs = [normalize_typography(p) for p in raw_paras if re.search(r"[a-zA-Z]", p)]
+        from src.core.youtube_importer import (
+            is_youtube_url,
+            fetch_youtube_oembed_metadata,
+            parse_pasted_transcript,
+        )
+
+        suggested_title, paragraphs = parse_pasted_transcript(raw_text)
         if not paragraphs:
             raise ValueError("粘贴的内容中未检测到有效的英文段落。")
+
+        title = custom_title
         source_desc = "用户文本导入"
         source_url = url or ""
+
+        # If URL is a YouTube video and user didn't specify custom title, try oEmbed title
+        if not title and url and is_youtube_url(url):
+            try:
+                oembed_title, oembed_author = await fetch_youtube_oembed_metadata(url)
+                if oembed_title and oembed_title != "YouTube Video":
+                    title = oembed_title
+                    source_desc = f"YouTube 视频转录文稿 · {oembed_author}"
+            except Exception:
+                pass
+
+        if not title:
+            title = suggested_title or "Pasted Article"
+
+        title = normalize_typography(title)
     else:
         raw_html = await fetch_web_page(url)
         extracted_title, paragraphs = clean_html_article(raw_html, fallback_url=url)

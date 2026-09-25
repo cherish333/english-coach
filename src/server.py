@@ -15,7 +15,7 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body, UploadFile, File, Form, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 
 from src.config import (
@@ -28,6 +28,7 @@ from src.config import (
     SENSEVOICE_DIR,
     KOKORO_MODEL,
     KOKORO_VOICES,
+    MEDIA_DIR,
 )
 from src.core.vad import VadProcessor
 from src.core.asr import AsrProcessor
@@ -40,6 +41,8 @@ from src.core.evaluator import evaluate_pronunciation
 from src.core.translation import translation_service
 from src.core.progress import ProgressManager
 from src.core.web_importer import process_web_or_text_import
+from src.core.ai_practice_generator import generate_ai_practice_document, AI_PRACTICE_PRESETS
+from src.core.notes_generator import smart_notes_generator
 from pydantic import BaseModel
 from typing import Literal
 from src.core.model_runtime import runtime
@@ -67,6 +70,27 @@ tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
 document_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="documents")
 document_library = DocumentLibrary()
 
+
+def get_asr_executor() -> ThreadPoolExecutor:
+    global asr_executor
+    if asr_executor is None or getattr(asr_executor, "_shutdown", False):
+        asr_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
+    return asr_executor
+
+
+def get_tts_executor() -> ThreadPoolExecutor:
+    global tts_executor
+    if tts_executor is None or getattr(tts_executor, "_shutdown", False):
+        tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
+    return tts_executor
+
+
+def get_document_executor() -> ThreadPoolExecutor:
+    global document_executor
+    if document_executor is None or getattr(document_executor, "_shutdown", False):
+        document_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="documents")
+    return document_executor
+
 MAX_AUDIO_FRAME_BYTES = 1024 * 1024
 MAX_TEXT_INPUT_CHARS = 4000
 MIN_TTS_SPEED = 0.5
@@ -75,13 +99,27 @@ MAX_TTS_SPEED = 2.0
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    get_asr_executor()
+    get_tts_executor()
+    get_document_executor()
     yield
     await runtime.close()
+    try:
+        await translation_service.close()
+    except Exception:
+        pass
+    try:
+        await smart_notes_generator.close()
+    except Exception:
+        pass
     # Do not wait for a cancelled inference call forever during shutdown. Any
     # already-running native inference is allowed to finish in its worker.
-    asr_executor.shutdown(wait=False, cancel_futures=True)
-    tts_executor.shutdown(wait=False, cancel_futures=True)
-    document_executor.shutdown(wait=False, cancel_futures=True)
+    if asr_executor and not getattr(asr_executor, "_shutdown", False):
+        asr_executor.shutdown(wait=False, cancel_futures=True)
+    if tts_executor and not getattr(tts_executor, "_shutdown", False):
+        tts_executor.shutdown(wait=False, cancel_futures=True)
+    if document_executor and not getattr(document_executor, "_shutdown", False):
+        document_executor.shutdown(wait=False, cancel_futures=True)
     document_library.close()
 
 
@@ -114,12 +152,12 @@ def get_tts():
     if tts_processor is None:
         with processor_init_lock:
             if tts_processor is None:
-                tts_processor = TtsProcessor(executor=tts_executor)
+                tts_processor = TtsProcessor(executor=get_tts_executor())
     return tts_processor
 
 
 class ModelSelection(BaseModel):
-    model: Literal["qwen", "minicpm"]
+    model: Literal["qwen", "minicpm", "bonsai"]
 
 
 def require_local_model_control(request: Request):
@@ -136,11 +174,13 @@ def require_local_model_control(request: Request):
 
 
 @app.get("/api/models/status")
+@app.get("/api/model/current")
 async def model_status():
     return await runtime.status()
 
 
 @app.post("/api/models/select", status_code=202)
+@app.post("/api/model/select", status_code=202)
 async def select_model(selection: ModelSelection, request: Request):
     require_local_model_control(request)
     try:
@@ -160,6 +200,7 @@ async def stop_models(request: Request):
     return {"accepted": True}
 
 
+@app.head("/")
 @app.get("/")
 async def root():
     return FileResponse(str(STATIC_DIR / "index.html"))
@@ -179,6 +220,8 @@ async def health_check():
     return JSONResponse({
         "status": "ready" if files_ready and qwen_status == "ready" else "degraded",
         "qwen": "ready" if model_state["active"] == "qwen" and not model_state["busy"] else "unreachable",
+        "minicpm": "ready" if model_state["active"] == "minicpm" and not model_state["busy"] else "unreachable",
+        "bonsai": "ready" if model_state["active"] == "bonsai" and not model_state["busy"] else "unreachable",
         "llm": model_state,
         "vad": "available" if model_files["vad"].is_file() else "missing",
         "asr": "loaded" if asr_processor is not None else "available" if model_files["asr"].is_file() and model_files["asr_tokens"].is_file() else "missing",
@@ -253,7 +296,7 @@ async def tts_post_endpoint(payload: dict = Body(...)):
 @app.get("/api/documents")
 async def list_documents():
     loop = asyncio.get_running_loop()
-    documents = await loop.run_in_executor(document_executor, document_library.list_documents)
+    documents = await loop.run_in_executor(get_document_executor(), document_library.list_documents)
     return {"documents": documents}
 
 
@@ -278,7 +321,7 @@ async def upload_document(
     loop = asyncio.get_running_loop()
     try:
         doc_info = await loop.run_in_executor(
-            document_executor,
+            get_document_executor(),
             document_library.add_custom_document,
             file.filename,
             content,
@@ -302,26 +345,31 @@ class UrlImportRequest(BaseModel):
 @app.post("/api/documents/import-url")
 async def import_url_document(req: UrlImportRequest):
     try:
-        final_title, pdf_bytes, desc, total_pages, filename = await process_web_or_text_import(
+        import_result = await process_web_or_text_import(
             url=req.url,
             raw_text=req.raw_text,
             custom_title=req.title,
         )
+        final_title, pdf_bytes, desc, total_pages, filename = import_result[:5]
+        media_path = getattr(import_result, "media_path", None)
+        sentence_timestamps = getattr(import_result, "sentence_timestamps", None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.exception("Failed to fetch or parse web article")
-        raise HTTPException(status_code=500, detail=f"抓取网页文章失败: {exc}")
+        logger.exception("Failed to fetch or parse web article or YouTube video")
+        raise HTTPException(status_code=500, detail=f"导入失败: {exc}")
 
     loop = asyncio.get_running_loop()
     try:
         doc_info = await loop.run_in_executor(
-            document_executor,
+            get_document_executor(),
             document_library.add_custom_document,
             filename,
             pdf_bytes,
             final_title,
             desc,
+            media_path,
+            sentence_timestamps,
         )
         return {"success": True, "document": doc_info}
     except DocumentError as exc:
@@ -333,10 +381,12 @@ async def import_url_document(req: UrlImportRequest):
 
 @app.delete("/api/documents/{document_id}")
 async def delete_document(document_id: str):
+    if not re.match(r"^[a-zA-Z0-9_\-\u4e00-\u9fa5]+$", document_id):
+        raise HTTPException(status_code=400, detail="Invalid document identifier")
     loop = asyncio.get_running_loop()
     try:
         success = await loop.run_in_executor(
-            document_executor,
+            get_document_executor(),
             document_library.delete_custom_document,
             document_id
         )
@@ -348,13 +398,64 @@ async def delete_document(document_id: str):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+class AiPracticeGenerateRequest(BaseModel):
+    prompt: str
+    count: Optional[int] = 20
+    difficulty: Optional[str] = "intermediate"
+    title: Optional[str] = None
+
+
+@app.get("/api/ai-practice/presets")
+async def get_ai_practice_presets():
+    return {"success": True, "presets": AI_PRACTICE_PRESETS}
+
+
+@app.post("/api/ai-practice/generate")
+async def generate_ai_practice_endpoint(req: AiPracticeGenerateRequest):
+    try:
+        gen_result = await generate_ai_practice_document(
+            prompt=req.prompt,
+            count=req.count or 20,
+            difficulty=req.difficulty or "intermediate",
+            custom_title=req.title,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Failed to generate AI practice curriculum")
+        raise HTTPException(status_code=500, detail=f"生成定制练习失败: {exc}")
+
+    loop = asyncio.get_running_loop()
+    try:
+        doc_info = await loop.run_in_executor(
+            get_document_executor(),
+            document_library.add_custom_document,
+            gen_result["filename"],
+            gen_result["pdf_bytes"],
+            gen_result["title"],
+            gen_result["description"],
+            None,
+            gen_result["sentences"],
+        )
+        return {
+            "success": True,
+            "document": doc_info,
+            "sentences": gen_result["sentences"],
+            "title": gen_result["title"],
+        }
+    except DocumentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Failed to register AI practice document")
+        raise HTTPException(status_code=500, detail=f"保存AI练习教材失败: {exc}")
+
 
 @app.get("/api/documents/{document_id}/pages/{page_number}")
 async def get_document_page(document_id: str, page_number: int):
     loop = asyncio.get_running_loop()
     try:
         page = await loop.run_in_executor(
-            document_executor, document_library.get_page, document_id, page_number
+            get_document_executor(), document_library.get_page, document_id, page_number
         )
         return page
     except DocumentError as exc:
@@ -368,7 +469,7 @@ async def get_document_page(document_id: str, page_number: int):
 async def get_document_units(document_id: str):
     loop = asyncio.get_running_loop()
     try:
-        units = await loop.run_in_executor(document_executor, document_library.get_units, document_id)
+        units = await loop.run_in_executor(get_document_executor(), document_library.get_units, document_id)
         return {"id": document_id, "units": units}
     except DocumentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -382,7 +483,7 @@ async def get_document_page_image(document_id: str, page_number: int):
     loop = asyncio.get_running_loop()
     try:
         image = await loop.run_in_executor(
-            document_executor, document_library.render_page, document_id, page_number
+            get_document_executor(), document_library.render_page, document_id, page_number
         )
         return Response(content=image, media_type="image/png", headers={"Cache-Control": "no-store"})
     except DocumentError as exc:
@@ -397,18 +498,207 @@ async def get_document_page_sentences(document_id: str, page_number: int):
     loop = asyncio.get_running_loop()
     try:
         sentences = await loop.run_in_executor(
-            document_executor, document_library.get_page_sentences, document_id, page_number
+            get_document_executor(), document_library.get_page_sentences, document_id, page_number
         )
         for s in sentences:
             cached = translation_service.get_cached(s.get("text", ""))
             if cached:
                 s["translation"] = cached
-        return {"id": document_id, "page": page_number, "sentences": sentences}
+
+        spec = document_library.specs.get(document_id)
+        has_media = bool(getattr(spec, "has_media", False)) if spec else False
+        media_type = getattr(spec, "media_type", None) if spec else None
+
+        return {
+            "id": document_id,
+            "page": page_number,
+            "has_media": has_media,
+            "media_type": media_type,
+            "media_url": f"/api/documents/{document_id}/media" if has_media else None,
+            "sentences": sentences,
+        }
     except DocumentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to extract page sentences")
         raise HTTPException(status_code=500, detail="Failed to extract page sentences") from exc
+
+
+@app.head("/api/documents/{document_id}/media")
+@app.get("/api/documents/{document_id}/media")
+async def get_document_media(document_id: str, request: Request):
+    if not re.match(r"^[a-zA-Z0-9_\-\u4e00-\u9fa5]+$", document_id):
+        raise HTTPException(status_code=400, detail="Invalid document identifier")
+
+    spec = document_library.specs.get(document_id)
+    if not spec:
+        raise HTTPException(status_code=404, detail="未找到该教材")
+
+    media_file = None
+
+    if getattr(spec, "media_filename", None):
+        cand = (MEDIA_DIR / spec.media_filename).resolve()
+        if cand.is_file() and cand.is_relative_to(MEDIA_DIR.resolve()):
+            media_file = cand
+
+    if not media_file:
+        for ext in [".mp4", ".m4a", ".webm", ".mp3", ".ogg"]:
+            cand = (MEDIA_DIR / f"{document_id}{ext}").resolve()
+            if cand.is_file() and cand.is_relative_to(MEDIA_DIR.resolve()):
+                media_file = cand
+                break
+
+    if not media_file or not media_file.is_file():
+        raise HTTPException(status_code=404, detail="未找到该教材的媒体音频/视频文件")
+
+    file_size = media_file.stat().st_size
+    ext = media_file.suffix.lower()
+    if ext == ".mp4":
+        media_type = "video/mp4"
+    elif ext in (".m4a", ".aac"):
+        media_type = "audio/mp4"
+    elif ext == ".webm":
+        media_type = "video/webm"
+    elif ext == ".mp3":
+        media_type = "audio/mpeg"
+    else:
+        media_type = "application/octet-stream"
+
+    if request.method == "HEAD":
+        return Response(
+            status_code=200,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+                "Content-Type": media_type,
+            }
+        )
+
+    range_header = request.headers.get("range")
+    if range_header and range_header.strip().startswith("bytes="):
+        try:
+            h = range_header.strip()[6:].strip()
+            parts = h.split("-", 1)
+            raw_start = parts[0].strip()
+            raw_end = parts[1].strip() if len(parts) > 1 else ""
+
+            if not raw_start and raw_end:
+                # Suffix byte range: bytes=-500 -> last 500 bytes
+                suffix_len = int(raw_end)
+                if suffix_len <= 0:
+                    return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+                start = max(0, file_size - suffix_len)
+                end = file_size - 1
+            elif raw_start:
+                start = int(raw_start)
+                if raw_end:
+                    end = int(raw_end)
+                    # RFC 7233: If end >= file_size, truncate to file_size - 1
+                    end = min(end, file_size - 1)
+                else:
+                    end = file_size - 1
+            else:
+                start = 0
+                end = file_size - 1
+
+            if start < 0 or start >= file_size or start > end:
+                return Response(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{file_size}"}
+                )
+
+            chunk_len = end - start + 1
+
+            def file_chunk_generator(path, offset, length, chunk_size=65536):
+                with open(path, "rb") as f:
+                    f.seek(offset)
+                    remaining = length
+                    while remaining > 0:
+                        to_read = min(remaining, chunk_size)
+                        data = f.read(to_read)
+                        if not data:
+                            break
+                        remaining -= len(data)
+                        yield data
+
+            return StreamingResponse(
+                file_chunk_generator(media_file, start, chunk_len),
+                status_code=206,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(chunk_len),
+                    "Content-Type": media_type,
+                }
+            )
+        except Exception as exc:
+            logger.debug(f"Range parsing fallback: {exc}")
+
+    def full_file_generator(path, chunk_size=65536):
+        with open(path, "rb") as f:
+            while chunk := f.read(chunk_size):
+                yield chunk
+
+    return StreamingResponse(
+        full_file_generator(media_file),
+        status_code=200,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+            "Content-Type": media_type,
+        }
+    )
+
+
+@app.get("/api/documents/{document_id}/sentences/{sentence_index}/audio")
+@app.get("/api/documents/{document_id}/sentences/{sentence_index}/media")
+async def get_sentence_media_info(
+    document_id: str,
+    sentence_index: int,
+    page: int = Query(1, description="Page number of the sentence"),
+):
+    loop = asyncio.get_running_loop()
+    try:
+        sentences = await loop.run_in_executor(
+            get_document_executor(), document_library.get_page_sentences, document_id, page
+        )
+        target_sent = None
+        for s in sentences:
+            if s.get("index") == sentence_index:
+                target_sent = s
+                break
+        if not target_sent and 1 <= sentence_index <= len(sentences):
+            target_sent = sentences[sentence_index - 1]
+
+        if not target_sent:
+            raise HTTPException(status_code=404, detail="Sentence not found")
+
+        spec = document_library.specs.get(document_id)
+        doc_has_media = bool(getattr(spec, "has_media", False)) if spec else False
+        sentence_has_media = bool(
+            doc_has_media
+            and target_sent.get("has_media", False)
+            and target_sent.get("start_time") is not None
+        )
+
+        return {
+            "document_id": document_id,
+            "page": page,
+            "sentence_index": sentence_index,
+            "text": target_sent.get("text", ""),
+            "has_media": sentence_has_media,
+            "start_time": target_sent.get("start_time"),
+            "end_time": target_sent.get("end_time"),
+            "media_url": f"/api/documents/{document_id}/media" if doc_has_media else None,
+            "media_type": getattr(spec, "media_type", None) if spec else None,
+        }
+    except DocumentError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to get sentence media info")
+        raise HTTPException(status_code=500, detail="Failed to get sentence media info")
 
 
 @app.post("/api/translate")
@@ -449,6 +739,43 @@ async def word_glosses_endpoint(payload: dict = Body(...)):
     except Exception as exc:
         logger.exception("Word glosses endpoint failed")
         raise HTTPException(status_code=500, detail="Failed to generate word glosses") from exc
+
+
+@app.post("/api/sentence/smart-notes")
+async def sentence_smart_notes_endpoint(payload: dict = Body(...)):
+    """Generate or retrieve structured Smart Whiteboard notes for a sentence using Cloud AI (NVIDIA NIM) or local LLM."""
+    try:
+        sentence = payload.get("sentence") or payload.get("text") or ""
+        if not isinstance(sentence, str) or not sentence.strip():
+            return {
+                "success": False,
+                "sentence": "",
+                "notes_markdown": "",
+                "cached": False,
+                "engine": "",
+                "error": "Empty sentence"
+            }
+
+        translation = payload.get("translation")
+        force_refresh = bool(payload.get("force_refresh", False))
+
+        result = await smart_notes_generator.generate_notes(
+            sentence_text=sentence.strip(),
+            translation=translation,
+            force_refresh=force_refresh
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Smart notes endpoint failed")
+        raise HTTPException(status_code=500, detail="Failed to generate smart notes") from exc
+
+
+@app.get("/api/translation/status")
+async def translation_status_endpoint():
+    """Retrieve current translation engines configuration and cache metrics."""
+    return translation_service.get_status()
 
 
 @app.post("/api/system/shutdown")
@@ -722,6 +1049,7 @@ async def save_progress_endpoint(payload: dict = Body(...)):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.head("/portrait")
 @app.get("/portrait")
 async def portrait_view():
     portrait_html = PROJECT_ROOT / "src" / "static" / "portrait.html"
@@ -736,18 +1064,37 @@ async def portrait_to_screen_endpoint():
     if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return {"status": "skipped", "reason": "not_in_hyprland"}
     try:
-        # Check and place portrait window on DP-1
+        # Check and place portrait window on DP-1 using hyprctl clients -j
         for _ in range(4):
             proc = await asyncio.create_subprocess_exec(
-                "hyprctl", "repl",
-                'for _, w in ipairs(hl.get_windows()) do if string.find(w.title, "竖屏教材阅读器") then hl.dispatch(hl.dsp.focus({ window = "address:" .. w.address })); if w.monitor.name ~= "DP-1" then hl.dispatch(hl.dsp.window.move({ monitor = "DP-1" })) end; return "focused on " .. w.monitor.name end end',
+                "hyprctl", "clients", "-j",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-            res = stdout.decode("utf-8").strip() if stdout else ""
-            if "focused on" in res:
-                return {"status": "ok", "result": res}
+            if stdout:
+                try:
+                    clients = json.loads(stdout.decode("utf-8", errors="replace"))
+                    for w in clients:
+                        title = w.get("title", "")
+                        if "竖屏教材阅读器" in title or "portrait" in title.lower():
+                            addr = w.get("address")
+                            if addr:
+                                focus_p = await asyncio.create_subprocess_exec(
+                                    "hyprctl", "dispatch", "focuswindow", f"address:{addr}",
+                                    stdout=asyncio.subprocess.PIPE,
+                                    stderr=asyncio.subprocess.PIPE,
+                                )
+                                await asyncio.wait_for(focus_p.communicate(), timeout=1.5)
+                                move_p = await asyncio.create_subprocess_exec(
+                                    "hyprctl", "dispatch", "movewindowmon", "DP-1",
+                                    stdout=asyncio.subprocess.PIPE,
+                                    stderr=asyncio.subprocess.PIPE,
+                                )
+                                await asyncio.wait_for(move_p.communicate(), timeout=1.5)
+                                return {"status": "ok", "result": f"focused and moved {addr} to DP-1"}
+                except Exception as parse_err:
+                    logger.debug(f"JSON parsing error for hyprctl clients: {parse_err}")
             await asyncio.sleep(0.25)
     except Exception as exc:
         logger.debug(f"Hyprland window positioning: {exc}")
@@ -859,10 +1206,10 @@ async def websocket_chat(websocket: WebSocket):
         try:
             loop = asyncio.get_running_loop()
             page = await loop.run_in_executor(
-                document_executor, document_library.get_page, document_id, page_number
+                get_document_executor(), document_library.get_page, document_id, page_number
             )
             sentences = await loop.run_in_executor(
-                document_executor, document_library.get_page_sentences, document_id, page_number
+                get_document_executor(), document_library.get_page_sentences, document_id, page_number
             )
             for s in sentences:
                 cached = translation_service.get_cached(s.get("text", ""))
@@ -888,6 +1235,10 @@ async def websocket_chat(websocket: WebSocket):
         llm.set_lecture_context(
             page["title"], page["page"], page["pages"], page["text"]
         )
+        spec = document_library.specs.get(page["id"])
+        has_media = bool(getattr(spec, "has_media", False)) if spec else False
+        media_type = getattr(spec, "media_type", None) if spec else None
+
         await send_event({
             "type": "lecture_context",
             "document_id": page["id"],
@@ -895,6 +1246,9 @@ async def websocket_chat(websocket: WebSocket):
             "page": page["page"],
             "pages": page["pages"],
             "has_text": page["has_text"],
+            "has_media": has_media,
+            "media_type": media_type,
+            "media_url": f"/api/documents/{page['id']}/media" if has_media else None,
             "image_url": f"/api/documents/{page['id']}/pages/{page['page']}/image",
             "sentences": sentences,
         }, turn_generation)
@@ -972,7 +1326,7 @@ async def websocket_chat(websocket: WebSocket):
             try:
                 loop = asyncio.get_running_loop()
                 user_text = await loop.run_in_executor(
-                    asr_executor, asr.transcribe, speech_audio, 16000
+                    get_asr_executor(), asr.transcribe, speech_audio, 16000
                 )
             except asyncio.CancelledError:
                 is_transcribing = False
@@ -994,22 +1348,26 @@ async def websocket_chat(websocket: WebSocket):
                     logger.info("Ignoring ambient speech in read_only mode")
                     await send_event({"type": "status", "text": "纯读模式（已屏蔽麦克风）"})
                     return
-                if active_sentence_action == "practice" and active_target_sentence:
-                    eval_result = evaluate_pronunciation(active_target_sentence, user_text)
-                    await send_event({"type": "pronunciation_eval", "eval": eval_result}, turn_generation)
-                    if eval_result.get("score", 100) < 80:
-                        try:
-                            NotesManager.save_mistake(
-                                sentence_text=active_target_sentence,
-                                mistake_type="pronunciation",
-                                mistake_detail=f"得分 {eval_result['score']}分，识别: '{user_text}'",
-                                document_id=lecture_context.get("id") if lecture_context else None,
-                                document_title=lecture_context.get("title") if lecture_context else None,
-                                page_number=lecture_context.get("page") if lecture_context else None,
-                                sentence_index=active_sentence_index,
-                            )
-                        except Exception:
-                            logger.exception("Failed to auto-save pronunciation mistake")
+                if active_sentence_action == "practice":
+                    if active_target_sentence:
+                        eval_result = evaluate_pronunciation(active_target_sentence, user_text)
+                        await send_event({"type": "pronunciation_eval", "eval": eval_result}, turn_generation)
+                        if eval_result.get("score", 100) < 80:
+                            try:
+                                NotesManager.save_mistake(
+                                    sentence_text=active_target_sentence,
+                                    mistake_type="pronunciation",
+                                    mistake_detail=f"得分 {eval_result['score']}分，识别: '{user_text}'",
+                                    document_id=lecture_context.get("id") if lecture_context else None,
+                                    document_title=lecture_context.get("title") if lecture_context else None,
+                                    page_number=lecture_context.get("page") if lecture_context else None,
+                                    sentence_index=active_sentence_index,
+                                )
+                            except Exception:
+                                logger.exception("Failed to auto-save pronunciation mistake")
+                    await send_event({"type": "status", "text": "跟读评测完成，请查看打分反馈"})
+                    is_transcribing = False
+                    return
                 try:
                     await start_turn(user_text)
                 finally:
@@ -1135,6 +1493,8 @@ async def websocket_chat(websocket: WebSocket):
                             sentence_text=data.get("sentence_text"),
                             title=data.get("title"),
                             category=data.get("category", "lecture"),
+                            is_mistake=1 if data.get("is_mistake") else 0,
+                            mistake_type=data.get("mistake_type", ""),
                         )
                         await send_event({"type": "note_saved", "note": saved})
                     except Exception as exc:

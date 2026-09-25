@@ -15,6 +15,7 @@
         <select id="local-model-select" aria-label="选择本地模型">
           <option value="qwen">Qwen3.8 27B</option>
           <option value="minicpm">MiniCPM5 2B</option>
+          <option value="bonsai">Bonsai 27B</option>
         </select>
         <button id="local-model-start" class="btn btn-outline" type="button">启动模型</button>
         <button id="local-model-stop" class="btn btn-quiet" type="button">停止</button>
@@ -83,6 +84,7 @@
         </div>
 
         <button id="dual-screen-btn" class="btn btn-outline" title="弹出竖屏教材阅读器，与横屏主窗口实时联动">🖥️ 双屏联动</button>
+        <button id="layout-manager-btn" class="btn btn-outline" title="调整功能模块面板位置与多屏分工 (如打字区移至竖屏)">📐 布局调整</button>
         <button id="notes-library-btn" class="btn btn-quiet" title="打开学习笔记库">📚 笔记库</button>
 
         <!-- 折叠菜单：设置与系统工具 -->
@@ -124,6 +126,8 @@
                   <span id="theme-text">深色模式</span>
                 </button>
                 <button id="sidebar-toggle-btn" class="btn btn-quiet" title="收起/展开左侧教材栏 (双屏联动时收起，享受宽屏智能黑板与跟打)">◀ 折叠教材栏</button>
+                <button id="notes-toggle-btn" class="btn btn-quiet" title="收起/展开右侧智能板书">▶ 折叠板书</button>
+                <button id="menu-layout-btn" class="btn btn-quiet" title="打开面板布局与多屏位置配置">📐 面板布局…</button>
               </div>
             </div>
 
@@ -143,6 +147,7 @@
     <!-- 三栏左右可拖拽布局 -->
     <div class="workspace-three-col" id="workspace-container">
       <button id="expand-sidebar-tab" class="sidebar-expand-tab" style="display: none;" title="展开左侧教材视口与章节导航">📖 展开教材栏 ❯</button>
+      <button id="expand-notes-tab" class="notes-expand-tab" style="display: none;" title="展开右侧智能板书">❮ 展开板书 📝</button>
       <!-- 左栏：教材视口与章节导航 (上下可拖动) -->
       <aside class="col-panel col-left" id="col-left" aria-label="教材浏览与导航">
         <!-- 上子栏：教材高清视口 -->
@@ -185,7 +190,8 @@
             <label class="field-label" for="lecture-doc-select">教材</label>
             <div class="doc-select-row">
               <select id="lecture-doc-select" aria-label="教材"></select>
-              <button id="import-url-btn" class="btn-upload" title="从网页链接导入英文文章 (支持网页正文一键提取与排版)">🌐 导入文章</button>
+              <button id="ai-practice-btn" class="btn-upload ai-practice-btn" title="✨ AI 定制练习：告诉大模型你想练习的内容，自动生成专属句子开始打字跟打与精讲！">✨ AI 定制练习</button>
+              <button id="import-url-btn" class="btn-upload" title="从网页链接或 YouTube 视频导入英文教材 (支持文章正文提取与视频原声字幕导入)">🌐 导入文章/视频</button>
               <button id="upload-doc-btn" class="btn-upload" title="上传自定义PDF教材 (支持点击或拖拽PDF文件)">📁 上传</button>
               <input type="file" id="doc-file-input" accept=".pdf" style="display:none">
             </div>
@@ -298,6 +304,7 @@
                   </div>
                 </div>
                 <div class="fs-header-right">
+                  <button id="fs-ai-practice-btn" class="mini-icon-btn fs-ai-practice-btn" title="✨ AI 智能出题：随时生成全新专属跟打练习">✨ AI 出题</button>
                   <button id="fs-bg-toggle-btn" class="mini-icon-btn fs-bg-toggle-btn" title="切换背景效果：磨砂玻璃 / 深邃纯黑">✨ 磨砂玻璃</button>
                   <span class="fs-shortcut-hint">快捷键: ←/→ 翻页 · ↑/↓ 翻句 · Esc 退出</span>
                   <button id="exit-fullscreen-btn" class="mini-icon-btn fs-exit-btn" title="退出全屏 (快捷键: Esc / F10)">✕ 退出全屏</button>
@@ -313,12 +320,35 @@
                 <span class="translation-text" id="typing-translation-text">载入教材后显示中文释义</span>
               </div>
 
+              <!-- Video Sync Strip & Compact Viewport for YouTube & Media Lessons -->
+              <div class="video-player-container compact-sync-mode" id="video-player-container" style="display: none;">
+                <div class="video-player-header">
+                  <div class="video-header-left">
+                    <span class="video-sync-pill portrait-connected" id="video-sync-status-pill" title="竖屏教材端声画同步：视频原声在竖屏高清置顶播放，主台键盘打字空间已完全释放">
+                      <span class="video-sync-dot"></span>
+                      <span class="video-badge" id="video-badge-label">📺 竖屏声画同步中</span>
+                    </span>
+                    <span class="video-timestamp-badge" id="video-timestamp-badge">00:00 - 00:00</span>
+                  </div>
+                  <div class="video-header-controls">
+                    <button id="video-replay-clip-btn" class="mini-icon-btn" title="重播当前句视频片段 (快捷键: Alt+V)">🔁 重播片段</button>
+                    <button id="video-autoplay-btn" class="mini-icon-btn active" title="句子切换时自动播放视频片段 开/关">▶ 自动连播</button>
+                    <button id="video-pip-btn" class="mini-icon-btn" title="画中画悬浮窗播放 (一边看视频一边任意窗口打字)">🔲 悬浮窗</button>
+                    <button id="video-visibility-toggle-btn" class="mini-icon-btn" title="单屏展开 / 折叠本地视频视口">🖥️ 本地视口</button>
+                  </div>
+                </div>
+                <div class="video-viewport-wrapper collapsed" id="video-viewport-wrapper">
+                  <video id="document-video-element" playsinline preload="metadata" controlsList="nodownload"></video>
+                </div>
+              </div>
+
               <!-- Shadow Typing Card (对照跟打强化练习区) -->
               <div class="shadow-typing-card" id="shadow-typing-card">
                 <div class="typing-card-header" id="typing-card-header">
                   <div class="typing-header-left">
                     <span class="typing-card-title">⌨️ 逐词跟打练习</span>
                     <span class="typing-status-pill" id="typing-status-pill">待打字</span>
+                    <button id="typing-dock-btn" class="dock-toggle-btn" title="切换跟打练习区停靠位置 (横屏 / 竖屏)">📱 移至竖屏</button>
                   </div>
                   <div class="typing-metrics-bar">
                     <span class="typing-combo-badge" id="typing-combo-badge">Combo x0 🔥</span>
@@ -331,6 +361,23 @@
                     </div>
                   </div>
                 </div>
+
+                <!-- 竖屏停靠提示条 (打字区移至竖屏时呈现) -->
+                <div id="typing-docked-notice" class="typing-docked-notice" style="display: none;">
+                  <div class="docked-notice-left">
+                    <span class="docked-notice-icon">📱</span>
+                    <div class="docked-notice-body">
+                      <div class="docked-notice-title">跟打练习区已停靠至竖屏模式 (DP-1 9:16)</div>
+                      <div class="docked-notice-desc">当前可在竖屏窗口直接击键跟打，音效与积分实时双向同步。横屏空间已完全释放。</div>
+                      <div class="docked-notice-tags">
+                        <span class="docked-tag" id="docked-tag-sentence">当前第 1 句</span>
+                        <span class="docked-tag live">⚡ 竖屏打字中</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button id="typing-undock-btn" class="btn btn-outline btn-xs" title="将跟打区域移回横屏主台">🖥️ 移回横屏</button>
+                </div>
+
                 <div class="typing-target-display" id="typing-target-display" tabindex="0" title="跟打练习区 (按 Tab 键可切换至上方口语互动)">
                   <span class="char-pending">载入教材后开始跟打练习</span>
                 </div>
@@ -359,6 +406,7 @@
                     <button id="typing-word-trans-btn" class="mini-icon-btn active" title="单词释义：英文读完后自动朗读简短中文释义 (开启中，点击关闭)"><span class="btn-text-badge">中</span></button>
                     <button id="typing-sound-btn" class="mini-icon-btn" title="敲击音效开关">🔊</button>
                     <button id="typing-trans-toggle-btn" class="mini-icon-btn active" title="显示/隐藏参考译文">🇨🇳</button>
+                    <button id="typing-original-media-btn" class="mini-icon-btn" style="display: none;" title="播放原声原音视频片段 (快捷键: Alt+V)">🎬 原声</button>
                     <button id="typing-replay-btn" class="mini-icon-btn" title="重听原句发音 (快捷键: Alt+R / Shift+Enter)">🔁</button>
                     <button id="typing-loop-btn" class="mini-icon-btn" title="单句循环播放 开/关 (快捷键: Alt+L)">🔂</button>
                     <button id="typing-clear-btn" class="mini-icon-btn" title="清空重打">↺</button>
@@ -402,6 +450,8 @@
             <h2 style="margin: 0; font-size: 14px;">学习智能板书</h2>
           </div>
           <div class="whiteboard-actions">
+            <button id="generate-notes-btn" class="btn btn-xs btn-accent" style="font-weight: 600;" title="使用云端AI极速生成当前句智能板书 (树状句法·重点生词精讲)">⚡ 智能板书</button>
+            <button id="notes-dock-btn" class="dock-toggle-btn" style="padding: 2px 8px; font-size: 11px;" title="切换板书笔记停靠位置 (横屏 / 竖屏)">📱 移至竖屏</button>
             <button id="save-notes-btn" class="btn btn-xs btn-primary" title="保存当前板书到本地笔记库">💾 收藏</button>
             <button id="copy-notes-btn" class="btn btn-xs btn-quiet" title="复制Markdown笔记">📋 复制</button>
             <button id="export-notes-btn" class="btn btn-xs btn-quiet" title="导出所有学习笔记为Markdown文件">📥 导出.md</button>
@@ -418,33 +468,100 @@
     </div>
   </div>
 
-  <!-- Web Article Import Modal -->
+  <!-- Web Article & YouTube Import Modal -->
   <div id="url-import-modal" class="modal-backdrop" style="display: none;">
     <div class="modal-dialog" style="max-width: 540px;">
       <div class="modal-header">
-        <h2>🌐 导入网页文章学习</h2>
+        <h2>🌐 导入文章 / YouTube 视频字幕</h2>
         <button id="url-import-close-btn" class="icon-btn" title="关闭">✕</button>
       </div>
       <div class="modal-body">
         <form id="url-import-form" onsubmit="return false;">
           <div style="margin-bottom: 12px;">
-            <label class="field-label" for="import-url-input" style="display: block; margin-bottom: 6px; font-weight: 600;">文章网址 (URL)</label>
-            <input type="url" id="import-url-input" class="text-input" placeholder="例如: https://omarchy.org/manual/" style="width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 13px;">
+            <label class="field-label" for="import-url-input" style="display: block; margin-bottom: 6px; font-weight: 600;">文章或视频网址 (URL)</label>
+            <input type="url" id="import-url-input" class="text-input" placeholder="例如: https://omarchy.org/manual/ 或 https://www.youtube.com/watch?v=..." style="width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 13px;">
           </div>
           <div style="margin-bottom: 12px;">
-            <label class="field-label" for="import-title-input" style="display: block; margin-bottom: 6px; font-weight: 600;">自定义文章标题 (选填)</label>
-            <input type="text" id="import-title-input" class="text-input" placeholder="留空则自动提取网页标题" style="width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 13px;">
+            <label class="field-label" for="import-title-input" style="display: block; margin-bottom: 6px; font-weight: 600;">自定义教材标题 (选填)</label>
+            <input type="text" id="import-title-input" class="text-input" placeholder="留空则自动提取网页或视频标题" style="width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 13px;">
           </div>
           <div style="margin-bottom: 14px;">
-            <details style="font-size: 12px; color: var(--muted); cursor: pointer;">
-              <summary style="user-select: none; margin-bottom: 6px; outline: none;">📋 或直接在此粘贴文章纯文本 / Markdown (防爬虫备用)</summary>
-              <textarea id="import-raw-text-input" rows="4" placeholder="若网页需要登录或有反爬限制，可直接将英文正文粘贴至此..." style="width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 12px; resize: vertical; line-height: 1.5;"></textarea>
+            <details id="url-import-raw-details" style="font-size: 12px; color: var(--muted); cursor: pointer;">
+              <summary style="user-select: none; margin-bottom: 6px; outline: none;">📋 或直接在此粘贴文章纯文本 / Markdown / 字幕文本 (防反爬备用)</summary>
+              <textarea id="import-raw-text-input" rows="4" placeholder="若网页需要登录或网络受限，可直接将英文正文或字幕文本粘贴至此..." style="width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 12px; resize: vertical; line-height: 1.5;"></textarea>
             </details>
           </div>
-          <div id="url-import-status" style="margin-bottom: 12px; font-size: 12px; color: var(--blue); min-height: 18px;"></div>
+          <div id="url-import-status" style="margin-bottom: 12px; font-size: 12px; color: var(--blue); min-height: 18px; white-space: pre-wrap; word-break: break-word; line-height: 1.5;"></div>
           <div style="display: flex; justify-content: flex-end; gap: 8px;">
             <button type="button" id="url-import-cancel-btn" class="btn btn-quiet">取消</button>
             <button type="submit" id="url-import-submit-btn" class="btn btn-primary" style="background: var(--blue); color: #fff; font-weight: 600;">🚀 开始提取并导入</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Custom Practice Generator Modal -->
+  <div id="ai-practice-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog" style="max-width: 580px;">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <h2>✨ AI 智能定制练习</h2>
+          <span class="ai-practice-tag">本地大模型实时出题</span>
+        </div>
+        <button id="ai-practice-close-btn" class="icon-btn" title="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="ai-practice-form" onsubmit="return false;">
+          <div style="margin-bottom: 12px;">
+            <label class="field-label" for="ai-practice-prompt-input" style="display: block; margin-bottom: 6px; font-weight: 600;">想要练习的主题、语法点或应用场景</label>
+            <textarea id="ai-practice-prompt-input" rows="3" class="text-input" placeholder="输入你想练习的内容，例如：&#10;• 写一个带有悬疑反转的程序员幽默小故事，情节连贯适合沉浸式跟打&#10;• 帮我生成 8 句关于跨国团队远程办公与项目汇报的高频职场英语&#10;• 练习包含倒装句、虚拟语气与同位语的考研/雅思经典长难句&#10;• 机场转机、行李托运与海关申报的地道口语表达..." style="width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 13px; line-height: 1.5; resize: vertical;"></textarea>
+          </div>
+
+          <!-- Quick Preset Chips -->
+          <div style="margin-bottom: 14px;">
+            <span style="font-size: 11px; color: var(--muted); font-weight: 600; display: block; margin-bottom: 6px;">💡 点击快速套用预设灵感:</span>
+            <div id="ai-practice-preset-container" class="preset-chips-wrapper">
+              <!-- Populated dynamically via JS from /api/ai-practice/presets -->
+            </div>
+          </div>
+
+          <!-- Options Grid: Count & Difficulty -->
+          <div class="ai-practice-options-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px;">
+            <div>
+              <label class="field-label" style="display: block; margin-bottom: 6px; font-weight: 600;">练习句子数量</label>
+              <div class="radio-chip-group" id="ai-practice-count-group">
+                <label class="radio-chip"><input type="radio" name="ai-count" value="5"> 5 句</label>
+                <label class="radio-chip active"><input type="radio" name="ai-count" value="8" checked> 8 句</label>
+                <label class="radio-chip"><input type="radio" name="ai-count" value="12"> 12 句</label>
+                <label class="radio-chip"><input type="radio" name="ai-count" value="15"> 15 句</label>
+                <label class="radio-chip"><input type="radio" name="ai-count" value="20"> 20 句</label>
+              </div>
+            </div>
+
+            <div>
+              <label class="field-label" style="display: block; margin-bottom: 6px; font-weight: 600;">语言难度等级</label>
+              <div class="radio-chip-group" id="ai-practice-diff-group">
+                <label class="radio-chip"><input type="radio" name="ai-diff" value="elementary"> 🟢 初级日常</label>
+                <label class="radio-chip active"><input type="radio" name="ai-diff" value="intermediate" checked> 🟡 进阶通用</label>
+                <label class="radio-chip"><input type="radio" name="ai-diff" value="advanced"> 🔴 高阶学术</label>
+                <label class="radio-chip"><input type="radio" name="ai-diff" value="auto"> ✨ 智能匹配</label>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-bottom: 14px;">
+            <label class="field-label" for="ai-practice-title-input" style="display: block; margin-bottom: 6px; font-weight: 600;">自定义练习册标题 (选填)</label>
+            <input type="text" id="ai-practice-title-input" class="text-input" placeholder="留空则由 AI 根据内容自动生成精彩标题" style="width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-muted); color: var(--ink); font-size: 13px;">
+          </div>
+
+          <div id="ai-practice-status" style="margin-bottom: 12px; font-size: 12px; color: var(--blue); min-height: 18px; white-space: pre-wrap; word-break: break-word; line-height: 1.5;"></div>
+
+          <div style="display: flex; justify-content: flex-end; gap: 8px;">
+            <button type="button" id="ai-practice-cancel-btn" class="btn btn-quiet">取消</button>
+            <button type="submit" id="ai-practice-submit-btn" class="btn btn-primary" style="background: var(--blue); color: #fff; font-weight: 600; display: inline-flex; align-items: center; gap: 6px;">
+              <span>✨ 立即出题并开始跟打</span>
+            </button>
           </div>
         </form>
       </div>
@@ -569,6 +686,88 @@
                   <span class="empty-hint">暂无词频统计</span>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  <!-- Panel Layout & Docking Modal -->
+  <div id="layout-manager-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog" style="max-width: 580px;">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <h2>📐 面板布局与多屏位置调整</h2>
+          <span class="ai-practice-tag">自由定制工作台</span>
+        </div>
+        <button id="layout-modal-close-btn" class="icon-btn" title="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="layout-section-title">⚡ 一键场景化布局预设</div>
+        <div class="layout-preset-grid">
+          <div class="layout-preset-card" id="preset-dual-screen" title="竖屏负责视听跟打，横屏负责口语与板书">
+            <div class="preset-card-header">
+              <span class="preset-title">🚀 双屏极致分工</span>
+              <span class="preset-badge">极力推荐</span>
+            </div>
+            <div class="preset-desc">竖屏打字跟打 + 竖屏教材，横屏自动折叠教材栏，享受超宽口语对话与智能板书！</div>
+          </div>
+          <div class="layout-preset-card" id="preset-standard" title="单屏全功能经典模式">
+            <div class="preset-card-header">
+              <span class="preset-title">🖥️ 标准全能单屏</span>
+            </div>
+            <div class="preset-desc">教材视口、口语对话、逐词跟打与板书全部在横屏三栏完整显示。</div>
+          </div>
+          <div class="layout-preset-card" id="preset-focus-typing" title="专注打字练习模式">
+            <div class="preset-card-header">
+              <span class="preset-title">⌨️ 沉浸跟打大屏</span>
+            </div>
+            <div class="preset-desc">折叠左侧教材与右侧板书，中栏宽屏全景跟打与口语交互。</div>
+          </div>
+        </div>
+
+        <div class="layout-section-title">🎛️ 独立模块位置与可见性设置</div>
+        <div class="layout-options-table">
+          <div class="layout-option-row">
+            <div class="layout-option-info">
+              <span class="layout-option-label">⌨️ 逐词跟打练习区位置</span>
+              <span class="layout-option-desc">选择跟打练习面板停靠的屏幕（支持实时键盘敲击与动效同步）</span>
+            </div>
+            <div class="radio-chip-group" id="layout-dock-group">
+              <label class="radio-chip active" id="chip-dock-landscape"><input type="radio" name="typing-dock" value="landscape" checked> 🖥️ 横屏主台</label>
+              <label class="radio-chip" id="chip-dock-portrait"><input type="radio" name="typing-dock" value="portrait"> 📱 竖屏屏幕 (DP-1)</label>
+            </div>
+          </div>
+
+          <div class="layout-option-row">
+            <div class="layout-option-info">
+              <span class="layout-option-label">📖 教材视口与单元目录 (左栏)</span>
+              <span class="layout-option-desc">控制横屏左侧教材预览与章节选择栏显示</span>
+            </div>
+            <div class="radio-chip-group" id="layout-sidebar-group">
+              <label class="radio-chip active" id="chip-sidebar-show"><input type="radio" name="sidebar-vis" value="show" checked> 显示</label>
+              <label class="radio-chip" id="chip-sidebar-hide"><input type="radio" name="sidebar-vis" value="hide"> 折叠收起</label>
+            </div>
+          </div>
+
+          <div class="layout-option-row">
+            <div class="layout-option-info">
+              <span class="layout-option-label">📝 学习智能板书停靠屏幕</span>
+              <span class="layout-option-desc">选择智能板书笔记停靠的屏幕（移至竖屏后横屏完全释放给口语交互与跟打）</span>
+            </div>
+            <div class="radio-chip-group" id="layout-notes-dock-group">
+              <label class="radio-chip active" id="chip-notes-dock-landscape"><input type="radio" name="notes-dock" value="landscape" checked> 🖥️ 横屏主台</label>
+              <label class="radio-chip" id="chip-notes-dock-portrait"><input type="radio" name="notes-dock" value="portrait"> 📱 竖屏屏幕 (DP-1)</label>
+            </div>
+          </div>
+
+          <div class="layout-option-row">
+            <div class="layout-option-info">
+              <span class="layout-option-label">📝 学习智能板书 (右栏可见性)</span>
+              <span class="layout-option-desc">控制横屏右侧实时板书笔记栏显示/折叠</span>
+            </div>
+            <div class="radio-chip-group" id="layout-notes-group">
+              <label class="radio-chip active" id="chip-notes-show"><input type="radio" name="notes-vis" value="show" checked> 显示</label>
+              <label class="radio-chip" id="chip-notes-hide"><input type="radio" name="notes-vis" value="hide"> 折叠收起</label>
             </div>
           </div>
         </div>

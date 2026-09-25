@@ -6,6 +6,7 @@
   <title>AI English Coach · 竖屏教材阅读器</title>
   <link rel="icon" type="image/png" href="/static/icon.png">
   <link rel="stylesheet" href="/static/style.css?v=2.4">
+  <script src="/static/marked.min.js"></script>
   <style>
     :root {
       --bg-dark: #090d16;
@@ -260,12 +261,148 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+    }
+
+    /* 顶部视听展台与 16:9 原声视频剧场样式 */
+    .p-stage-content {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+    .pdf-top-panel.video-mode {
+      background: #000 !important;
+      overflow: hidden !important;
+      padding: 0 !important;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      justify-content: flex-start;
+    }
+    .p-video-stage {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+      background: #000;
+    }
+    .p-video-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 14px;
+      background: rgba(15, 23, 42, 0.96);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      font-size: 12px;
+      height: 38px;
+      box-sizing: border-box;
+      flex-shrink: 0;
+      z-index: 10;
+    }
+    .p-video-header-left, .p-video-header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .p-video-badge {
+      font-weight: 700;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+    .p-video-ts {
+      color: #94a3b8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      background: rgba(255, 255, 255, 0.07);
+      padding: 2px 7px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .p-video-live-pill {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--green);
+      border: 1px solid rgba(34, 197, 94, 0.35);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+    .p-video-viewport {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      max-height: calc(100% - 38px);
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      margin: 0 auto;
+    }
+    #p-document-video-element {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+      display: block;
+    }
+    .sentence-timestamp-pill {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      color: #94a3b8;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      margin-left: 6px;
+    }
+    .p-autoplay-unlock-banner {
+      position: absolute;
+      top: 42px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(234, 88, 12, 0.95);
+      color: #ffffff;
+      padding: 6px 16px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 700;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+      z-index: 50;
+      cursor: pointer;
+      display: none;
+      animation: pulse-border 1.5s infinite ease-in-out;
+      border: 1px solid #fdba74;
+      white-space: nowrap;
     }
 
     /* 浅色主题支持 (Light Theme Overrides) */
     [data-theme="light"] body {
       background: #f1f5f9;
+      color: #0f172a;
+    }
+    [data-theme="light"] .p-video-header {
+      background: rgba(255, 255, 255, 0.96);
+      border-bottom-color: #cbd5e1;
+    }
+    [data-theme="light"] .p-video-ts {
+      color: #64748b;
+      background: rgba(0, 0, 0, 0.05);
+      border-color: rgba(0, 0, 0, 0.1);
+    }
+    [data-theme="light"] .p-video-header .mini-icon-btn {
+      background: #f1f5f9;
+      border-color: #cbd5e1;
+      color: #334155;
+    }
+    [data-theme="light"] .p-video-header .mini-icon-btn:hover {
+      background: #e2e8f0;
       color: #0f172a;
     }
     [data-theme="light"] .portrait-header {
@@ -626,11 +763,230 @@
       border-color: #0369a1;
     }
 
+    /* 竖屏智能板书笔记区域 */
+    .p-notes-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--surface-dark, #0b1120);
+      margin: 8px 16px 16px 16px;
+      border: 1px solid #273549;
+      border-radius: 10px;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+    }
+    .p-notes-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      background: #131c2d;
+      border-bottom: 1px solid #273549;
+      flex-shrink: 0;
+    }
+    .p-notes-title-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .p-notes-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #f8fafc;
+    }
+    .p-notes-status-badge {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent);
+      background: rgba(56, 189, 248, 0.15);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .p-notes-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .p-notes-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 18px;
+      font-size: 13.5px;
+      line-height: 1.68;
+      color: #e2e8f0;
+      word-break: break-word;
+    }
+    .p-notes-content h1, .p-notes-content h2, .p-notes-content h3 {
+      color: var(--accent);
+      margin: 12px 0 6px 0;
+      font-size: 14.5px;
+      font-weight: 700;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 4px;
+    }
+    .p-notes-content p {
+      margin: 6px 0;
+    }
+    .p-notes-content ul, .p-notes-content ol {
+      padding-left: 20px;
+      margin: 6px 0;
+    }
+    .p-notes-content li {
+      margin: 3px 0;
+    }
+    .p-notes-content strong {
+      color: #38bdf8;
+      font-weight: 700;
+    }
+    .p-notes-content code {
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      color: #f59e0b;
+    }
+    .p-notes-content pre {
+      background: #090d16;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 10px;
+      overflow-x: auto;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    .p-notes-content .vocab-play-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(56, 189, 248, 0.2);
+      color: var(--accent);
+      font-size: 11px;
+      cursor: pointer;
+      margin-left: 4px;
+      vertical-align: middle;
+      transition: all 0.15s ease;
+    }
+    .p-notes-content .vocab-play-btn:hover {
+      background: var(--accent);
+      color: #000;
+      transform: scale(1.1);
+    }
+    .p-notes-content .vocab-word-clickable {
+      cursor: pointer;
+      border-bottom: 1px dashed rgba(56, 189, 248, 0.6);
+      transition: color 0.15s ease;
+    }
+    .p-notes-content .vocab-word-clickable:hover {
+      color: var(--accent);
+    }
+    [data-theme="light"] .p-notes-container {
+      background: #ffffff;
+      border-color: #cbd5e1;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
+    }
+    [data-theme="light"] .p-notes-header {
+      background: #f8fafc;
+      border-bottom-color: #e2e8f0;
+    }
+    [data-theme="light"] .p-notes-title {
+      color: #0f172a;
+    }
+    [data-theme="light"] .p-notes-content {
+      color: #334155;
+    }
+    [data-theme="light"] .p-notes-content h1,
+    [data-theme="light"] .p-notes-content h2,
+    [data-theme="light"] .p-notes-content h3 {
+      color: #0284c7;
+      border-bottom-color: #e2e8f0;
+    }
+    [data-theme="light"] .p-notes-content strong {
+      color: #0369a1;
+    }
+
     .empty-prompt {
       text-align: center;
       color: #64748b;
       font-size: 13px;
       margin-top: 30px;
+    }
+
+    /* 竖屏全屏智能板书模式 (主屏全屏跟打联动 或 竖屏手动全屏) */
+    .portrait-body.notes-fullscreen-active #pdf-panel,
+    .portrait-body.notes-fullscreen-active #portrait-resizer-vertical,
+    .portrait-body.notes-fullscreen-active .bottom-control-toolbar,
+    .portrait-body.notes-fullscreen-active #p-shadow-typing-card,
+    .portrait-body.notes-fullscreen-active #p-sentences-container {
+      display: none !important;
+    }
+
+    .portrait-body.notes-fullscreen-active .sentences-bottom-panel {
+      flex: 1 1 100% !important;
+      height: 100% !important;
+      max-height: 100% !important;
+      padding: 0 !important;
+      border-top: none !important;
+    }
+
+    .portrait-body.notes-fullscreen-active .p-notes-container {
+      display: flex !important;
+      flex: 1 1 100% !important;
+      height: calc(100% - 46px) !important;
+      margin: 6px 12px 12px 12px !important;
+      border-radius: 12px;
+      border-color: rgba(56, 189, 248, 0.4);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+    }
+
+    .portrait-body.notes-fullscreen-active .p-notes-header {
+      padding: 10px 18px;
+      background: #0f172a;
+      border-bottom-color: rgba(56, 189, 248, 0.25);
+    }
+
+    .portrait-body.notes-fullscreen-active .p-notes-title {
+      font-size: 14.5px;
+    }
+
+    .portrait-body.notes-fullscreen-active .p-notes-status-badge.active {
+      background: rgba(168, 85, 247, 0.2);
+      color: #c084fc;
+      border: 1px solid rgba(168, 85, 247, 0.4);
+    }
+
+    .portrait-body.notes-fullscreen-active .p-notes-content {
+      font-size: 15px;
+      line-height: 1.8;
+      padding: 20px 26px;
+    }
+
+    .portrait-body.notes-fullscreen-active .p-notes-content h1,
+    .portrait-body.notes-fullscreen-active .p-notes-content h2,
+    .portrait-body.notes-fullscreen-active .p-notes-content h3 {
+      font-size: 16px;
+      margin: 16px 0 8px 0;
+    }
+
+    .portrait-body.notes-fullscreen-active .p-notes-content pre {
+      font-size: 13.5px;
+      line-height: 1.6;
+      padding: 14px 18px;
+      background: #070b13;
+      border-color: #273549;
+    }
+
+    [data-theme="light"] .portrait-body.notes-fullscreen-active .p-notes-container {
+      border-color: #38bdf8;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.1);
+    }
+    [data-theme="light"] .portrait-body.notes-fullscreen-active .p-notes-header {
+      background: #f1f5f9;
     }
   </style>
 
@@ -651,6 +1007,8 @@
 
       <div class="portrait-nav">
         <a href="/" target="_blank" class="btn btn-quiet" style="padding: 4px 8px; font-size: 12px; height: 32px; text-decoration: none; display: inline-flex; align-items: center; color: inherit;" title="打开或聚焦横屏主控制台">🖥️ 主台</a>
+        <button id="p-typing-dock-btn" class="btn btn-outline" style="padding: 4px 10px; font-size: 12px; height: 32px;" title="切换打字练习区停靠位置 (在竖屏打字 / 移至横屏)">⌨️ 竖屏跟打</button>
+        <button id="p-notes-dock-btn" class="btn btn-outline" style="padding: 4px 10px; font-size: 12px; height: 32px;" title="切换智能板书停靠位置 (在竖屏展示 / 移至横屏)">📝 竖屏板书</button>
         <button id="p-theme-toggle-btn" class="btn btn-quiet" style="padding: 4px 10px; font-size: 12px; height: 32px;" title="切换深色/浅色外观">
           <span id="p-theme-icon">🌙</span> <span id="p-theme-text">深色</span>
         </button>
@@ -663,18 +1021,43 @@
     </header>
 
     <!-- 上下栏主体 -->
-    <div class="portrait-body">
-      <!-- 上栏：教材高清页面浏览 -->
+    <div class="portrait-body" id="portrait-body">
+      <!-- 上栏：教材大图与 16:9 原声视频全宽舞台 -->
       <section class="pdf-top-panel" id="pdf-panel">
-        <div class="pdf-floating-tools">
-          <button class="tool-mini-btn" id="zoom-in-btn">放大 +</button>
-          <button class="tool-mini-btn" id="zoom-out-btn">缩小 -</button>
-          <button class="tool-mini-btn" id="zoom-reset-btn">自适应宽</button>
+        <!-- 模式 A: 普通 PDF 教材视图 -->
+        <div id="p-pdf-stage" class="p-stage-content">
+          <div class="pdf-floating-tools">
+            <button class="tool-mini-btn" id="zoom-in-btn">放大 +</button>
+            <button class="tool-mini-btn" id="zoom-out-btn">缩小 -</button>
+            <button class="tool-mini-btn" id="zoom-reset-btn">自适应宽</button>
+          </div>
+          <div class="pdf-viewport-inner">
+            <div id="p-pdf-wrapper" class="portrait-page-wrapper">
+              <img id="p-page-image" class="pdf-page-img" src="" alt="教材页面加载中...">
+              <div id="p-highlight-layer" class="pdf-highlight-layer"></div>
+            </div>
+          </div>
         </div>
-        <div class="pdf-viewport-inner">
-          <div id="p-pdf-wrapper" class="portrait-page-wrapper">
-            <img id="p-page-image" class="pdf-page-img" src="" alt="教材页面加载中...">
-            <div id="p-highlight-layer" class="pdf-highlight-layer"></div>
+
+        <!-- 模式 B: 原声视频剧场展台 (YouTube & 视频课程，16:9 宽屏高清置顶展示) -->
+        <div id="p-video-stage" class="p-stage-content p-video-stage" style="display: none;">
+          <div class="p-video-header">
+            <div class="p-video-header-left">
+              <span class="p-video-badge">🎬 视频原声原音</span>
+              <span class="p-video-ts" id="p-video-ts">00:00 - 00:00</span>
+              <span class="p-video-live-pill" id="p-video-live-pill">⚡ 同步连通</span>
+            </div>
+            <div class="p-video-header-right">
+              <button id="p-video-play-btn" class="mini-icon-btn" style="padding: 2px 8px; font-size: 11px;" title="播放 / 暂停当前句视频片段 (快捷键: 空格 / Alt+V)">⏯️ 播放</button>
+              <button id="p-video-replay-btn" class="mini-icon-btn" style="padding: 2px 8px; font-size: 11px;" title="重播当前句原声视频 (Alt+V / Alt+R)">🔁 重播片段</button>
+              <button id="p-video-loop-btn" class="mini-icon-btn" style="padding: 2px 8px; font-size: 11px;" title="单句循环播放 开/关 (Alt+L)">🔂</button>
+              <button id="p-video-autoplay-btn" class="mini-icon-btn active" style="padding: 2px 8px; font-size: 11px;" title="句子切换时自动播放视频片段 开/关">▶ 自动连播</button>
+              <button id="p-video-mute-btn" class="mini-icon-btn" style="padding: 2px 8px; font-size: 11px;" title="静音 / 恢复音效">🔊</button>
+            </div>
+          </div>
+          <div class="p-video-viewport" id="p-video-viewport">
+            <div id="p-autoplay-unlock-banner" class="p-autoplay-unlock-banner" title="点击启用浏览器自动播放声音权限">▶ 点击此处启用竖屏音画自动连播</div>
+            <video id="p-document-video-element" playsinline preload="metadata" controlsList="nodownload"></video>
           </div>
         </div>
       </section>
@@ -683,8 +1066,16 @@
       <div class="resizer-v portrait-resizer-v" id="portrait-resizer-vertical" title="上下拖动调整教材视口与控制面板高度"></div>
 
       <!-- 下栏：逐句精讲、连续播放与控制 -->
-      <section class="sentences-bottom-panel">
-        <!-- 控制工具栏 (纯粹视听导览，去除了冗余打字/发音卡片与风格切换) -->
+      <section class="sentences-bottom-panel" id="sentences-bottom-panel">
+        <!-- 竖屏功能视图切换：视听跟打兼顾 / 专注跟打 / 课文句子 / 智能板书 -->
+        <div class="p-panel-tabs" id="p-panel-tabs">
+          <button class="p-panel-tab-btn active" data-view="split" id="p-tab-split" title="上方跟打 + 下方句子列表">📑 视听跟打兼顾</button>
+          <button class="p-panel-tab-btn" data-view="typing" id="p-tab-typing" title="专注大屏逐词跟打">⌨️ 专注跟打</button>
+          <button class="p-panel-tab-btn" data-view="sentences" id="p-tab-sentences" title="完整整页句子列表导览">📖 课文与句子</button>
+          <button class="p-panel-tab-btn" data-view="notes" id="p-tab-notes" title="查看AI实时智能板书笔记">📝 智能板书</button>
+        </div>
+
+        <!-- 控制工具栏 -->
         <div class="bottom-control-toolbar">
           <div class="toolbar-group">
             <button id="p-ctrl-prev" class="btn btn-quiet" style="padding: 6px 10px;" title="上一句">◀ 上一句</button>
@@ -703,6 +1094,8 @@
             <button id="p-ctrl-explain" class="btn btn-primary" style="padding: 6px 12px;" title="对当前句进行双语深度精讲">📖 精讲</button>
             <button id="p-ctrl-read" class="btn btn-quiet" style="padding: 6px 12px;" title="播放原声朗读">🔊 纯读</button>
             <button id="p-ctrl-practice" class="btn btn-outline" style="padding: 6px 12px;" title="跟读练习">🎙️ 跟读</button>
+            <button id="p-ctrl-typing" class="btn btn-outline" style="padding: 6px 12px;" title="切换竖屏逐词跟打面板">⌨️ 跟打</button>
+            <button id="p-ctrl-notes" class="btn btn-outline" style="padding: 6px 12px;" title="切换竖屏智能板书面板">📝 板书</button>
           </div>
 
           <div class="toolbar-group">
@@ -729,9 +1122,85 @@
           </div>
         </div>
 
+        <!-- 竖屏逐词跟打练习区 (当打字区域移至竖屏时呈现) -->
+        <div class="shadow-typing-card" id="p-shadow-typing-card" style="display: none;">
+          <div class="typing-card-header" id="p-typing-card-header">
+            <div class="typing-header-left">
+              <span class="typing-card-title">⌨️ 逐词跟打练习</span>
+              <span class="typing-status-pill" id="p-typing-status-pill">待打字</span>
+              <button id="p-undock-btn" class="dock-toggle-btn" title="将跟打练习区移回横屏主台">🖥️ 移回横屏</button>
+            </div>
+            <div class="typing-metrics-bar">
+              <span class="typing-combo-badge" id="p-typing-combo-badge">Combo x0 🔥</span>
+              <span class="typing-wpm-badge" id="p-typing-wpm-badge">0 WPM</span>
+              <div class="typing-odometer-pill" id="p-typing-odometer-pill" title="打字总里程表：统计敲击过的每个单词">
+                <span class="typing-odometer-icon">🚗</span>
+                <span class="typing-odometer-label">总里程</span>
+                <span class="typing-odometer-val" id="p-typing-odometer-val">0</span>
+                <span class="typing-odometer-unit">词</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="typing-target-display" id="p-typing-target-display" tabindex="0" title="竖屏跟打练习区 (点击直接开始敲击键盘跟打)">
+            <span class="char-pending">载入教材后开始跟打练习</span>
+          </div>
+
+          <div class="typing-hint-bar">
+            <span id="p-typing-progress-text">进度: 0 / 0 字符</span>
+
+            <div class="typing-nav-group">
+              <div class="studio-page-badge" id="p-studio-page-badge" title="当前页码">
+                <button id="p-studio-prev-page-btn" class="nav-mini-btn" title="上一页">←</button>
+                <span id="p-studio-page-num" class="nav-page-num">P. 1</span>
+                <button id="p-studio-next-page-btn" class="nav-mini-btn" title="下一页">→</button>
+              </div>
+              <div class="sentence-stepper" id="p-sentence-stepper-box" title="当前页句子导航">
+                <button id="p-sent-prev-btn" class="nav-mini-btn" title="上一句">◀</button>
+                <span id="p-sent-progress-label" class="nav-sent-label">第 1 / 0 句</span>
+                <button id="p-sent-next-btn" class="nav-mini-btn" title="下一句">▶</button>
+              </div>
+            </div>
+
+            <div class="typing-actions-group">
+              <button id="p-typing-repeat-btn" class="mini-icon-btn repeat-mode-btn" title="单句跟打遍数模式 (点击切换 1/2/3 遍)">
+                <span id="p-typing-repeat-label">1遍</span>
+              </button>
+              <button id="p-typing-word-sound-btn" class="mini-icon-btn active" title="单词发音开关">🔤</button>
+              <button id="p-typing-word-trans-btn" class="mini-icon-btn active" title="单词中文释义"><span class="btn-text-badge">中</span></button>
+              <button id="p-typing-sound-btn" class="mini-icon-btn" title="敲击音效开关">🔊</button>
+              <button id="p-typing-replay-btn" class="mini-icon-btn" title="重听原句发音">🔁</button>
+              <button id="p-typing-loop-btn" class="mini-icon-btn" title="单句循环播放">🔂</button>
+              <button id="p-typing-clear-btn" class="mini-icon-btn" title="清空重打">↺</button>
+              <label class="auto-typing-toggle-label" title="句子切换时自动聚焦打字框">
+                <input type="checkbox" id="p-auto-typing-toggle" checked> 自动聚焦
+              </label>
+            </div>
+          </div>
+        </div>
+
         <!-- 句子列表 (全页句子清晰导览，高亮跟随) -->
         <div class="sentences-scroll-area" id="p-sentences-container">
           <div class="empty-prompt">载入教材中...</div>
+        </div>
+
+        <!-- 竖屏智能板书笔记展示区 (当板书停靠至竖屏时呈现) -->
+        <div class="p-notes-container" id="p-notes-container" style="display: none;">
+          <div class="p-notes-header">
+            <div class="p-notes-title-group">
+              <span class="p-notes-title">📝 实时智能板书</span>
+              <span class="p-notes-status-badge" id="p-notes-status-badge">同步就绪</span>
+            </div>
+            <div class="p-notes-actions">
+              <button id="p-notes-gen-btn" class="btn btn-quiet" style="padding: 2px 8px; font-size: 11px; color: var(--accent); font-weight: 600;" title="使用云端AI极速生成当前句智能板书 (树状句法·重点生词精讲)">⚡ 生成板书</button>
+              <button id="p-notes-fs-btn" class="btn btn-quiet" style="padding: 2px 8px; font-size: 11px;" title="全屏查看智能板书 (快捷键: F10)">⛶ 全屏</button>
+              <button id="p-notes-copy-btn" class="btn btn-quiet" style="padding: 2px 8px; font-size: 11px;" title="复制当前板书笔记">📋 复制</button>
+              <button id="p-notes-undock-btn" class="dock-toggle-btn" style="padding: 2px 8px; font-size: 11px;" title="将智能板书移回横屏主台">🖥️ 移回横屏</button>
+            </div>
+          </div>
+          <div class="p-notes-content" id="p-notes-content">
+            <div class="empty-prompt">等待导师讲解生成板书笔记…</div>
+          </div>
         </div>
       </section>
     </div>
@@ -748,6 +1217,18 @@
     // Translation cache & focus state
     const portraitTranslations = {};
     let currentFocusTextCleaned = "";
+
+    function isValidChineseTranslation(sourceText, trans) {
+      if (!trans || typeof trans !== "string") return false;
+      const t = trans.trim();
+      const s = (sourceText || "").trim();
+      if (!t || !s) return false;
+      if (t.toLowerCase() === s.toLowerCase()) return false;
+      const hasLetters = /[a-zA-Z]{2,}/.test(s);
+      const hasChinese = /[\u4e00-\u9fa5]/.test(t);
+      if (hasLetters && !hasChinese) return false;
+      return true;
+    }
 
     function escapeHtml(text) {
       if (text === null || text === undefined) return "";
@@ -825,18 +1306,94 @@
     const pFocusTransToggle = document.getElementById("p-focus-trans-toggle");
 
     let currentPortraitActionMode = localStorage.getItem("ai_coach_action_mode") || "explain";
+    let isPortraitVideoAutoplay = localStorage.getItem("ai_coach_portrait_autoplay") !== "false";
+    let isPortraitLoopPlayback = false;
+    let portraitLoopTimer = null;
+    let hasPortraitInteracted = false;
+    let isNotesFullscreen = false;
+    let savedViewModeBeforeFs = null;
+    let isLandscapeTypingFullscreen = false;
+
+    window.addEventListener("pointerdown", () => {
+      hasPortraitInteracted = true;
+      const banner = document.getElementById("p-autoplay-unlock-banner");
+      if (banner) banner.style.display = "none";
+    }, { capture: true });
 
     // Listen to sync events from landscape master window
     syncChannel.onmessage = (event) => {
       const { type, data } = event.data || {};
       if (type === "page_updated") {
         if (data.document_id !== currentDocId || data.page !== currentPage) {
+          const prevDocId = currentDocId;
           currentDocId = data.document_id;
           currentPage = data.page;
-          loadPage(currentDocId, currentPage, false);
+          const targetSent = data.sentence_index || 1;
+          if (prevDocId !== currentDocId) {
+            const hasOption = Array.from(docSelect.options).some(o => o.value === currentDocId);
+            if (!hasOption) {
+              initDocuments().then(() => loadUnits(targetSent));
+            } else {
+              docSelect.value = currentDocId;
+              loadUnits(targetSent);
+            }
+          } else {
+            loadPage(currentDocId, currentPage, false, targetSent);
+          }
         }
-      } else if (type === "sentence_selected") {
-        selectSentence(data.sentence_index, false);
+      } else if (type === "sentence_change" || type === "sentence_selected") {
+        if (data && data.sentence_index) {
+          if (data.source === "portrait") return;
+          selectSentence(data.sentence_index, true);
+          if (data.auto_play && isPortraitVideoAutoplay) {
+            playSentenceAudioDirect(data.sentence_index);
+          }
+        }
+      } else if (type === "play" || type === "video_play_clip") {
+        if (data && data.sentence_index) {
+          if (typeof data.loop === "boolean") {
+            isPortraitLoopPlayback = data.loop;
+            const loopBtn = document.getElementById("p-video-loop-btn");
+            if (loopBtn) loopBtn.classList.toggle("active", isPortraitLoopPlayback);
+          }
+          selectSentence(data.sentence_index, true);
+          playSentenceAudioDirect(data.sentence_index);
+        }
+      } else if (type === "pause" || type === "video_pause") {
+        const pVideoEl = document.getElementById("p-document-video-element");
+        if (pVideoEl && !pVideoEl.paused) {
+          try { pVideoEl.pause(); } catch (_) {}
+        }
+        if (pVideoCheckInterval) {
+          clearInterval(pVideoCheckInterval);
+          pVideoCheckInterval = null;
+        }
+        document.querySelectorAll(".inline-play-btn.playing, #p-video-replay-btn.playing").forEach(b => b.classList.remove("playing"));
+        document.querySelectorAll(".sentence-card.speaking").forEach(c => c.classList.remove("speaking"));
+        const playBtn = document.getElementById("p-video-play-btn");
+        if (playBtn) playBtn.textContent = "⏯️ 播放";
+      } else if (type === "seek") {
+        const pVideoEl = document.getElementById("p-document-video-element");
+        if (pVideoEl && data && typeof data.time === "number") {
+          try {
+            if (pVideoEl.readyState >= 1) pVideoEl.currentTime = data.time;
+            else pVideoEl.addEventListener("loadedmetadata", () => { pVideoEl.currentTime = data.time; }, { once: true });
+          } catch (_) {}
+        }
+      } else if (type === "video_mode") {
+        if (data) {
+          docHasMedia = !!data.has_media;
+          docMediaUrl = data.media_url || (docHasMedia ? `/api/documents/${data.document_id || currentDocId}/media` : null);
+          applyPortraitVideoModeUI(docHasMedia, docMediaUrl);
+        }
+      } else if (type === "loop_mode") {
+        if (data && typeof data.loop === "boolean") {
+          isPortraitLoopPlayback = data.loop;
+          const loopBtn = document.getElementById("p-video-loop-btn");
+          if (loopBtn) loopBtn.classList.toggle("active", isPortraitLoopPlayback);
+        }
+      } else if (type === "ping_portrait") {
+        try { syncChannel.postMessage({ type: "portrait_connected" }); } catch (_) {}
       } else if (type === "continuous_progress") {
         updateContinuousState(data.running, data.sentence_index);
       } else if (type === "action_mode") {
@@ -853,7 +1410,7 @@
           focusStatus.textContent = `🎙️ 发音评测: ${data.score}分`;
         }
       } else if (type === "document_uploaded") {
-        initDocuments();
+        initDocuments(data && data.id, 1, 1);
       } else if (type === "theme_changed") {
         if (data && data.theme) {
           applyPortraitTheme(data.theme, false);
@@ -863,15 +1420,49 @@
           updatePortraitHud(data);
         }
       } else if (type === "sentence_translation") {
-        // Landscape window fetched a translation — cache it and update UI if it matches current focus
-        if (data && data.text && data.translation) {
+        // Landscape window fetched a translation — validate and cache it
+        if (data && data.text && isValidChineseTranslation(data.text, data.translation)) {
           portraitTranslations[data.text] = data.translation;
           if (currentFocusTextCleaned === data.text && pFocusTransText) {
             pFocusTransText.textContent = data.translation;
           }
         }
+      } else if (type === "typing_dock_change") {
+        if (data && data.dock) {
+          setPortraitTypingDock(data.dock, false);
+        }
+      } else if (type === "notes_dock_change") {
+        if (data && data.dock) {
+          setPortraitNotesDock(data.dock, false);
+        }
+      } else if (type === "notes_update") {
+        if (data && data.notes !== undefined) {
+          renderPortraitWhiteboard(data.notes);
+        }
+      } else if (type === "typing_sync") {
+        if (data && data.source !== "portrait") {
+          mirrorLandscapeTyping(data);
+        }
+      } else if (type === "odometer_updated") {
+        if (data && data.total_words !== undefined) {
+          PortraitOdometerEngine.totalWords = Number(data.total_words) || PortraitOdometerEngine.totalWords;
+          PortraitOdometerEngine.updateDisplays();
+        }
+      } else if (type === "typing_fullscreen_change") {
+        if (data && data.active !== undefined) {
+          isLandscapeTypingFullscreen = !!data.active;
+          setPortraitNotesFullscreen(isLandscapeTypingFullscreen);
+        }
       }
     };
+
+    // Keep landscape aware of portrait connection state
+    setInterval(() => {
+      try { syncChannel.postMessage({ type: "portrait_heartbeat" }); } catch (_) {}
+    }, 4000);
+    window.addEventListener("beforeunload", () => {
+      try { syncChannel.postMessage({ type: "portrait_disconnected" }); } catch (_) {}
+    });
 
     const styleLabels = {
       spoken: "🗣️ 口语大师",
@@ -905,7 +1496,7 @@
       }
     }
 
-    async function initDocuments() {
+    async function initDocuments(targetDocId = null, targetPage = null, targetSentence = null) {
       try {
         await fetchLearningProgress();
         if (learningProgress) {
@@ -915,6 +1506,9 @@
           if (learningProgress.last_document_id) {
             currentDocId = learningProgress.last_document_id;
           }
+        }
+        if (targetDocId) {
+          currentDocId = targetDocId;
         }
 
         const res = await fetch("/api/documents");
@@ -951,9 +1545,9 @@
           await loadUnits(targetSentence);
         };
 
-        let initialPage = null;
-        let initialSentence = null;
-        if (learningProgress) {
+        let initialPage = targetPage;
+        let initialSentence = targetSentence;
+        if (!initialPage && learningProgress) {
           if (learningProgress.books && learningProgress.books[currentDocId]) {
             initialPage = learningProgress.books[currentDocId].last_page;
             initialSentence = learningProgress.books[currentDocId].last_sentence_index;
@@ -994,8 +1588,8 @@
           }
         };
 
-        // If page is 1 (cover) and units exist, auto-advance to Unit 1 page!
-        if (currentPage <= 1 && units.length > 0) {
+        // If page is 1 (cover) and units exist in built-in textbooks, auto-advance to Unit 1 page!
+        if (currentPage <= 1 && units.length > 0 && (currentDocId === "west_civ" || currentDocId === "vocabulary" || currentDocId === "grammar")) {
           currentPage = units[0].page;
         }
         const matchedUnit = [...units].reverse().find(u => u.page <= currentPage);
@@ -1016,28 +1610,37 @@
       pageLabel.textContent = `P. ${pageNum}`;
       pageImg.src = `/api/documents/${docId}/pages/${pageNum}/image?t=${Date.now()}`;
 
+      const targetSent = (targetSentence !== null && targetSentence !== undefined && targetSentence >= 1) ? targetSentence : 1;
+
       if (broadcast) {
         syncChannel.postMessage({
           type: "page_change_requested",
-          data: { document_id: docId, page: pageNum }
+          data: {
+            document_id: docId,
+            page: pageNum,
+            sentence_index: targetSent
+          }
         });
       }
 
       savePortraitProgress({
         document_id: docId,
         page: pageNum,
-        sentence_index: targetSentence || activeSentenceIndex || 1
+        sentence_index: targetSent
       });
 
       // Fetch sentences
       try {
         const res = await fetch(`/api/documents/${docId}/pages/${pageNum}/sentences`);
         const data = await res.json();
+        docHasMedia = !!data.has_media;
+        docMediaUrl = data.media_url || (docHasMedia ? `/api/documents/${docId}/media` : null);
+        applyPortraitVideoModeUI(docHasMedia, docMediaUrl);
         currentSentences = data.sentences || [];
         renderSentences(currentSentences);
         renderPortraitHighlights(currentSentences);
         if (currentSentences.length > 0) {
-          const sentIdx = targetSentence ? Math.max(1, Math.min(targetSentence, currentSentences.length)) : 1;
+          const sentIdx = Math.max(1, Math.min(targetSent, currentSentences.length));
           selectSentence(sentIdx, false);
         }
       } catch (err) {
@@ -1045,8 +1648,54 @@
       }
     }
 
+    let docHasMedia = false;
+    let docMediaUrl = null;
     let currentAudioPlayback = null;
     let currentAudioBtn = null;
+    let pVideoCheckInterval = null;
+
+    function applyPortraitVideoModeUI(hasMedia, mediaUrl) {
+      docHasMedia = !!hasMedia;
+      docMediaUrl = mediaUrl || (docHasMedia ? `/api/documents/${currentDocId}/media` : null);
+      const pdfPanel = document.getElementById("pdf-panel");
+      const pPdfStage = document.getElementById("p-pdf-stage");
+      const pVideoStage = document.getElementById("p-video-stage");
+      const pVideoEl = document.getElementById("p-document-video-element");
+
+      if (docHasMedia && docMediaUrl) {
+        if (pPdfStage) pPdfStage.style.display = "none";
+        if (pVideoStage) pVideoStage.style.display = "flex";
+        if (pdfPanel) {
+          pdfPanel.classList.add("video-mode");
+          const panelW = pdfPanel.clientWidth || window.innerWidth;
+          const videoFitH = Math.round(panelW * 9 / 16) + 38;
+          const maxAllowed = Math.round(window.innerHeight * 0.55);
+          const idealH = Math.min(maxAllowed, videoFitH);
+          const savedVideoH = parseInt(localStorage.getItem("ai_coach_portrait_video_h"), 10);
+          pdfPanel.style.height = (savedVideoH || idealH) + "px";
+        }
+        if (pVideoEl && (!pVideoEl.src || !pVideoEl.src.includes(`/api/documents/${currentDocId}/media`))) {
+          pVideoEl.src = docMediaUrl;
+          pVideoEl.load();
+        }
+      } else {
+        if (pPdfStage) pPdfStage.style.display = "flex";
+        if (pVideoStage) pVideoStage.style.display = "none";
+        if (pdfPanel) {
+          pdfPanel.classList.remove("video-mode");
+          const savedPdfH = parseInt(localStorage.getItem("ai_coach_portrait_pdf_h") || localStorage.getItem("ai_coach_portrait_top_h"), 10);
+          if (savedPdfH) pdfPanel.style.height = savedPdfH + "px";
+          else pdfPanel.style.height = "";
+        }
+        if (pVideoEl) {
+          if (!pVideoEl.paused) {
+            try { pVideoEl.pause(); } catch (_) {}
+          }
+          pVideoEl.removeAttribute("src");
+          pVideoEl.load();
+        }
+      }
+    }
 
     function playSentenceAudioDirect(index, btnEl) {
       const sentenceObj = currentSentences.find(s => s.index === index);
@@ -1055,9 +1704,8 @@
       if (!text) return;
 
       selectSentence(index, false);
-      focusStatus.textContent = "正在朗读原句...";
 
-      // Stop previous audio
+      // Stop previous audio and video
       if (currentAudioPlayback) {
         try {
           currentAudioPlayback.onended = null;
@@ -1068,29 +1716,165 @@
         } catch (_) {}
         currentAudioPlayback = null;
       }
+      if (portraitLoopTimer) {
+        clearTimeout(portraitLoopTimer);
+        portraitLoopTimer = null;
+      }
+      if (pVideoCheckInterval) {
+        clearInterval(pVideoCheckInterval);
+        pVideoCheckInterval = null;
+      }
+      const pVideoEl = document.getElementById("p-document-video-element");
+      if (pVideoEl && !pVideoEl.paused) {
+        try { pVideoEl.pause(); } catch (_) {}
+      }
       if (currentAudioBtn) {
         currentAudioBtn.classList.remove("playing");
         currentAudioBtn = null;
       }
 
       // Sync visual state across all play buttons for this sentence index
-      const matchingBtns = document.querySelectorAll(`.inline-play-btn[data-index="${index}"]`);
+      const matchingBtns = document.querySelectorAll(`.inline-play-btn[data-index="${index}"], #p-video-replay-btn`);
       matchingBtns.forEach(b => b.classList.add("playing"));
       if (btnEl) {
         btnEl.classList.add("playing");
         currentAudioBtn = btnEl;
       }
 
-      let voice = "en-US-JennyNeural";
-      const savedVoice = localStorage.getItem("ai_coach_voice");
-      if (savedVoice && (savedVoice.startsWith("en-") || savedVoice.startsWith("zh-"))) {
-        voice = savedVoice;
+      // If document has media and sentence has timestamps, play authentic video/audio segment
+      if (docHasMedia && pVideoEl && typeof sentenceObj.start_time === "number" && typeof sentenceObj.end_time === "number" && sentenceObj.end_time > sentenceObj.start_time) {
+        focusStatus.textContent = "正在播放原声原音...";
+        const startTime = Math.max(0, sentenceObj.start_time);
+        const endTime = Math.max(startTime + 0.1, sentenceObj.end_time);
+        const playBtn = document.getElementById("p-video-play-btn");
+
+        const finishMediaPlay = (didEndClip = true) => {
+          if (pVideoCheckInterval) {
+            clearInterval(pVideoCheckInterval);
+            pVideoCheckInterval = null;
+          }
+          matchingBtns.forEach(b => b.classList.remove("playing"));
+          if (btnEl) btnEl.classList.remove("playing");
+          if (currentAudioBtn === btnEl) currentAudioBtn = null;
+          const sentCard = document.getElementById(`sent-card-${index}`);
+          if (sentCard) sentCard.classList.remove("speaking");
+          if (playBtn) playBtn.textContent = "⏯️ 播放";
+
+          if (focusStatus && focusStatus.textContent === "正在播放原声原音...") {
+            focusStatus.textContent = "原音播放完成";
+          }
+          try {
+            syncChannel.postMessage({
+              type: "video_status",
+              data: { state: "paused", sentence_index: index, ended: didEndClip }
+            });
+            syncChannel.postMessage({
+              type: "pause",
+              data: { sentence_index: index, ended: didEndClip }
+            });
+          } catch (_) {}
+
+          if (didEndClip && isPortraitLoopPlayback) {
+            if (portraitLoopTimer) clearTimeout(portraitLoopTimer);
+            portraitLoopTimer = setTimeout(() => {
+              if (isPortraitLoopPlayback && activeSentenceIndex === index) {
+                playSentenceAudioDirect(index, btnEl);
+              }
+            }, 650);
+          }
+        };
+
+        const startVideoPlay = () => {
+          pVideoEl.play().then(() => {
+            const sentCard = document.getElementById(`sent-card-${index}`);
+            if (sentCard) sentCard.classList.add("speaking");
+            if (playBtn) playBtn.textContent = "⏸️ 暂停";
+            try {
+              syncChannel.postMessage({
+                type: "video_status",
+                data: { state: "playing", sentence_index: index }
+              });
+              syncChannel.postMessage({
+                type: "play",
+                data: { sentence_index: index, start_time: startTime, end_time: endTime }
+              });
+            } catch (_) {}
+            if (pVideoCheckInterval) clearInterval(pVideoCheckInterval);
+            pVideoCheckInterval = setInterval(() => {
+              if (pVideoEl.seeking) return;
+              if (pVideoEl.currentTime < startTime - 0.5) return;
+              if (pVideoEl.currentTime >= endTime || pVideoEl.ended) {
+                pVideoEl.pause();
+                finishMediaPlay(true);
+              }
+            }, 35);
+          }).catch(err => {
+            console.warn("Original media play failed in portrait, falling back to TTS:", err);
+            finishMediaPlay(false);
+            if (err && err.name === "NotAllowedError") {
+              const banner = document.getElementById("p-autoplay-unlock-banner");
+              if (banner) banner.style.display = "block";
+            } else {
+              playTtsFallback();
+            }
+          });
+        };
+
+        const seekAndStart = () => {
+          if (Math.abs(pVideoEl.currentTime - startTime) > 0.15) {
+            let seekHandled = false;
+            let timeoutId = setTimeout(() => {
+              if (!seekHandled) {
+                seekHandled = true;
+                startVideoPlay();
+              }
+            }, 600);
+            const onSeeked = () => {
+              if (!seekHandled) {
+                seekHandled = true;
+                clearTimeout(timeoutId);
+                pVideoEl.removeEventListener("seeked", onSeeked);
+                startVideoPlay();
+              }
+            };
+            pVideoEl.addEventListener("seeked", onSeeked, { once: true });
+            try {
+              pVideoEl.currentTime = startTime;
+            } catch (err) {
+              if (!seekHandled) {
+                seekHandled = true;
+                clearTimeout(timeoutId);
+                pVideoEl.removeEventListener("seeked", onSeeked);
+                startVideoPlay();
+              }
+            }
+          } else {
+            startVideoPlay();
+          }
+        };
+
+        if (pVideoEl.readyState >= 1) {
+          seekAndStart();
+        } else {
+          pVideoEl.addEventListener("loadedmetadata", seekAndStart, { once: true });
+        }
+        return;
       }
-      const speedVal = localStorage.getItem("ai_coach_speed") || "1.0";
-      const audioUrl = `/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}&speed=${encodeURIComponent(speedVal)}`;
-      const audio = new Audio(audioUrl);
-      audio._cancelled = false;
-      currentAudioPlayback = audio;
+
+      playTtsFallback();
+
+      function playTtsFallback() {
+        focusStatus.textContent = "正在朗读原句...";
+        let voice = "en-US-JennyNeural";
+        const savedVoice = localStorage.getItem("ai_coach_voice");
+        if (savedVoice && (savedVoice.startsWith("en-") || savedVoice.startsWith("zh-"))) {
+          voice = savedVoice;
+        }
+        const speedVal = localStorage.getItem("ai_coach_speed") || "1.0";
+        const audioUrl = `/api/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}&speed=${encodeURIComponent(speedVal)}`;
+        const audio = new Audio(audioUrl);
+        audio._cancelled = false;
+        currentAudioPlayback = audio;
 
       const finishPlaying = () => {
         matchingBtns.forEach(b => b.classList.remove("playing"));
@@ -1130,6 +1914,15 @@
         finishPlaying();
       });
     }
+  }
+
+    function formatTs(sec) {
+      if (sec === null || sec === undefined || isNaN(sec)) return "--:--";
+      const s = Math.max(0, Math.floor(sec));
+      const m = Math.floor(s / 60);
+      const rem = s % 60;
+      return `${String(m).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+    }
 
     function renderSentences(sentences) {
       sentProgress.textContent = `第 ${activeSentenceIndex || 1} / ${sentences.length} 句`;
@@ -1139,22 +1932,33 @@
         return;
       }
 
-      sentContainer.innerHTML = sentences.map(s => `
+      sentContainer.innerHTML = sentences.map(s => {
+        const hasMedia = docHasMedia && typeof s.start_time === "number";
+        const tsPill = hasMedia ? `<span class="sentence-timestamp-pill">⏱️ ${formatTs(s.start_time)}</span>` : "";
+        const playBtnTitle = hasMedia ? "播放原声视频片段 (Alt+V)" : "播放原音朗读";
+        const playBtnLabel = hasMedia ? "🎬 原声" : "🔊 读";
+        const inlinePlayLabel = hasMedia ? "🎬" : "🔊";
+
+        return `
         <div class="sentence-card ${activeSentenceIndex === s.index ? 'active' : ''}" id="sent-card-${s.index}" onclick="handlePortraitCardClick(${s.index})">
           <div class="sentence-card-meta">
-            <span class="sentence-num">#${s.index}</span>
+            <div style="display:flex;align-items:center;">
+              <span class="sentence-num">#${s.index}</span>
+              ${tsPill}
+            </div>
             <div class="sentence-actions-group" onclick="event.stopPropagation()">
-              <button class="btn-act" onclick="playSentenceAudioDirect(${s.index}, this)" title="播放原音朗读">🔊 读</button>
+              <button class="btn-act" onclick="playSentenceAudioDirect(${s.index}, this)" title="${playBtnTitle}">${playBtnLabel}</button>
               <button class="btn-act" onclick="triggerSentence(${s.index}, 'explain')" title="双语精讲">📖 讲</button>
               <button class="btn-act" onclick="triggerSentence(${s.index}, 'practice')" title="跟读练习">🎙️ 练</button>
             </div>
           </div>
           <div class="sentence-body-text">
             <span class="sentence-text-val">${escapeHtml(s.text)}</span>
-            <button class="inline-play-btn" data-index="${s.index}" onclick="event.stopPropagation(); playSentenceAudioDirect(${s.index}, this)" title="播放原句读音" aria-label="播放原句读音">🔊</button>
+            <button class="inline-play-btn ${hasMedia ? 'has-media-btn' : ''}" data-index="${s.index}" onclick="event.stopPropagation(); playSentenceAudioDirect(${s.index}, this)" title="${playBtnTitle}" aria-label="${playBtnTitle}">${inlinePlayLabel}</button>
           </div>
         </div>
-      `).join("");
+      `;
+      }).join("");
     }
 
     function renderPortraitHighlights(sentences) {
@@ -1181,8 +1985,8 @@
             e.stopPropagation();
             selectSentence(sent.index, true);
             syncChannel.postMessage({
-              type: "sentence_selected",
-              data: { sentence_index: sent.index }
+              type: "sentence_selected_from_portrait",
+              data: { sentence_index: sent.index, source: "portrait" }
             });
           });
 
@@ -1230,10 +2034,42 @@
 
       const targetSent = currentSentences.find(s => s.index === index);
       if (targetSent) {
-        focusText.innerHTML = `<span class="focus-text-val">${escapeHtml(targetSent.text)}</span> <button class="inline-play-btn focus-inline-play" data-index="${index}" onclick="event.stopPropagation(); playSentenceAudioDirect(${index}, this)" title="播放当前句读音" aria-label="播放当前句读音">🔊 听读音</button>`;
+        const hasMedia = docHasMedia && typeof targetSent.start_time === "number";
+        const playBtnLabel = hasMedia ? "🎬 原声" : "🔊 听读音";
+        focusText.innerHTML = `<span class="focus-text-val">${escapeHtml(targetSent.text)}</span> <button class="inline-play-btn focus-inline-play ${hasMedia ? 'has-media-btn' : ''}" data-index="${index}" onclick="event.stopPropagation(); playSentenceAudioDirect(${index}, this)" title="${hasMedia ? '播放当前句视频原声' : '播放当前句读音'}" aria-label="${hasMedia ? '播放当前句视频原声' : '播放当前句读音'}">${playBtnLabel}</button>`;
         const cleanedText = (targetSent.text || "").replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim();
         const cachedTrans = portraitTranslations[cleanedText] || targetSent.translation || null;
         updateFocusTranslation(cleanedText, cachedTrans);
+
+        const pVideoTs = document.getElementById("p-video-ts");
+        const pVideoEl = document.getElementById("p-document-video-element");
+        if (hasMedia && typeof targetSent.end_time === "number") {
+          if (pVideoTs) {
+            const formatTs = (sec) => {
+              if (isNaN(sec)) return "--:--";
+              const s = Math.max(0, Math.floor(sec));
+              return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+            };
+            pVideoTs.textContent = `${formatTs(targetSent.start_time)} - ${formatTs(targetSent.end_time)}`;
+          }
+          if (pVideoEl && !pVideoEl.seeking && pVideoEl.paused && Math.abs(pVideoEl.currentTime - targetSent.start_time) > 0.5) {
+            try {
+              if (pVideoEl.readyState >= 1) {
+                pVideoEl.currentTime = targetSent.start_time;
+              } else {
+                pVideoEl.addEventListener("loadedmetadata", () => {
+                  try { pVideoEl.currentTime = targetSent.start_time; } catch (_) {}
+                }, { once: true });
+              }
+            } catch (_) {}
+          }
+        }
+      }
+
+      if (targetSent && typeof setupPortraitShadowTyping === "function") {
+        const cleanedText = (targetSent.text || "").replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim();
+        const cachedTrans = portraitTranslations[cleanedText] || targetSent.translation || null;
+        setupPortraitShadowTyping(targetSent.text, cachedTrans);
       }
 
       document.querySelectorAll(".sentence-card").forEach(el => el.classList.remove("active"));
@@ -1241,12 +2077,25 @@
       if (card) {
         card.classList.add("active");
         if (scroll) {
-          card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          card.scrollIntoView({ behavior: "smooth", block: "center" });
         }
       }
 
       // Update PDF page real-time highlight on portrait screen
       highlightPortraitSentence(index, scroll);
+
+      // Update smart notes if portrait notes are currently visible
+      if (pNotesDock === "portrait" || pViewMode === "notes" || isNotesFullscreen) {
+        const targetSent = currentSentences.find(s => s.index === index);
+        const cleanedText = targetSent ? (targetSent.text || "").replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim() : "";
+        if (cleanedText) {
+          if (portraitNotesCache[cleanedText]) {
+            renderPortraitWhiteboard(portraitNotesCache[cleanedText]);
+          } else {
+            fetchPortraitSmartNotes(false);
+          }
+        }
+      }
 
       if (currentDocId && currentPage) {
         savePortraitProgress({
@@ -1284,6 +2133,21 @@
 
     function handlePortraitCardClick(index) {
       selectSentence(index);
+      if (docHasMedia) {
+        playSentenceAudioDirect(index);
+        const sentObj = currentSentences.find(s => s.index === index) || currentSentences[index - 1] || {};
+        syncChannel.postMessage({
+          type: "sentence_selected_from_portrait",
+          data: {
+            sentence_index: index,
+            start_time: sentObj.start_time,
+            end_time: sentObj.end_time,
+            auto_play: false,
+            source: "portrait"
+          }
+        });
+        return;
+      }
       const isPure = (currentPortraitActionMode === "read_only" || currentPortraitActionMode === "continuous_read");
       if (isPure) {
         triggerSentence(index, "read_only");
@@ -1313,10 +2177,10 @@
 
     // Nav controls
     document.getElementById("p-prev-page-btn").onclick = () => {
-      if (currentPage > 1) loadPage(currentDocId, currentPage - 1, true);
+      if (currentPage > 1) loadPage(currentDocId, currentPage - 1, true, 1);
     };
     document.getElementById("p-next-page-btn").onclick = () => {
-      loadPage(currentDocId, currentPage + 1, true);
+      loadPage(currentDocId, currentPage + 1, true, 1);
     };
 
     // Stepper buttons
@@ -1337,6 +2201,137 @@
     document.getElementById("p-ctrl-practice").onclick = () => {
       if (activeSentenceIndex) triggerSentence(activeSentenceIndex, "practice");
     };
+
+    const pVideoPlayBtn = document.getElementById("p-video-play-btn");
+    const pVideoEl = document.getElementById("p-document-video-element");
+    if (pVideoPlayBtn) {
+      pVideoPlayBtn.onclick = () => {
+        if (!pVideoEl) return;
+        if (pVideoEl.paused) {
+          if (activeSentenceIndex) playSentenceAudioDirect(activeSentenceIndex, pVideoReplayBtn);
+        } else {
+          pVideoEl.pause();
+          if (pVideoCheckInterval) {
+            clearInterval(pVideoCheckInterval);
+            pVideoCheckInterval = null;
+          }
+          document.querySelectorAll(".inline-play-btn.playing, #p-video-replay-btn.playing").forEach(b => b.classList.remove("playing"));
+          document.querySelectorAll(".sentence-card.speaking").forEach(c => c.classList.remove("speaking"));
+          pVideoPlayBtn.textContent = "⏯️ 播放";
+          try {
+            syncChannel.postMessage({ type: "pause", data: { sentence_index: activeSentenceIndex, ended: false } });
+            syncChannel.postMessage({ type: "video_status", data: { state: "paused", sentence_index: activeSentenceIndex } });
+          } catch (_) {}
+        }
+      };
+    }
+
+    if (pVideoEl) {
+      pVideoEl.style.cursor = "pointer";
+      pVideoEl.title = "点击播放 / 暂停当前句视频片段";
+      pVideoEl.onclick = () => {
+        if (pVideoPlayBtn) pVideoPlayBtn.click();
+      };
+    }
+
+    const pAutoplayUnlockBanner = document.getElementById("p-autoplay-unlock-banner");
+    if (pAutoplayUnlockBanner) {
+      pAutoplayUnlockBanner.onclick = () => {
+        pAutoplayUnlockBanner.style.display = "none";
+        hasPortraitInteracted = true;
+        if (activeSentenceIndex) playSentenceAudioDirect(activeSentenceIndex, pVideoReplayBtn);
+      };
+    }
+
+    const pVideoLoopBtn = document.getElementById("p-video-loop-btn");
+    if (pVideoLoopBtn) {
+      pVideoLoopBtn.classList.toggle("active", isPortraitLoopPlayback);
+      pVideoLoopBtn.onclick = () => {
+        isPortraitLoopPlayback = !isPortraitLoopPlayback;
+        pVideoLoopBtn.classList.toggle("active", isPortraitLoopPlayback);
+        try { syncChannel.postMessage({ type: "loop_mode", data: { loop: isPortraitLoopPlayback } }); } catch (_) {}
+      };
+    }
+
+    const pVideoReplayBtn = document.getElementById("p-video-replay-btn");
+    if (pVideoReplayBtn) {
+      pVideoReplayBtn.onclick = () => {
+        if (activeSentenceIndex) playSentenceAudioDirect(activeSentenceIndex, pVideoReplayBtn);
+      };
+    }
+
+    const pVideoAutoplayBtn = document.getElementById("p-video-autoplay-btn");
+    if (pVideoAutoplayBtn) {
+      pVideoAutoplayBtn.classList.toggle("active", isPortraitVideoAutoplay);
+      pVideoAutoplayBtn.onclick = () => {
+        isPortraitVideoAutoplay = !isPortraitVideoAutoplay;
+        localStorage.setItem("ai_coach_portrait_autoplay", isPortraitVideoAutoplay ? "true" : "false");
+        pVideoAutoplayBtn.classList.toggle("active", isPortraitVideoAutoplay);
+      };
+    }
+
+    const pVideoMuteBtn = document.getElementById("p-video-mute-btn");
+    if (pVideoMuteBtn) {
+      pVideoMuteBtn.onclick = () => {
+        if (pVideoEl) {
+          pVideoEl.muted = !pVideoEl.muted;
+          pVideoMuteBtn.textContent = pVideoEl.muted ? "🔇" : "🔊";
+          pVideoMuteBtn.title = pVideoEl.muted ? "恢复音效" : "静音";
+        }
+      };
+    }
+
+    function isPortraitTypingActive() {
+      const el = document.activeElement;
+      if (!el) return false;
+      const tag = el.tagName ? el.tagName.toLowerCase() : "";
+      if (tag === "input" || tag === "textarea" || tag === "select") return true;
+      if (el.isContentEditable) return true;
+      if (el.id === "p-typing-target-display" || (el.closest && el.closest("#p-shadow-typing-card"))) return true;
+      return false;
+    }
+
+    // Keyboard shortcuts on portrait screen
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && isNotesFullscreen) {
+        e.preventDefault();
+        setPortraitNotesFullscreen(false);
+        return;
+      }
+      if (e.key === "F10") {
+        e.preventDefault();
+        setPortraitNotesFullscreen(!isNotesFullscreen);
+        return;
+      }
+
+      if (isPortraitTypingActive()) return;
+
+      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "v" || e.key === "V" || e.key === "r" || e.key === "R" || e.code === "KeyV" || e.code === "KeyR")) {
+        e.preventDefault();
+        if (activeSentenceIndex) playSentenceAudioDirect(activeSentenceIndex, pVideoReplayBtn);
+        return;
+      }
+      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "l" || e.key === "L" || e.code === "KeyL")) {
+        e.preventDefault();
+        if (pVideoLoopBtn) pVideoLoopBtn.click();
+        return;
+      }
+      if (e.code === "Space" && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        if (pVideoPlayBtn) pVideoPlayBtn.click();
+        return;
+      }
+      if (e.key === "ArrowUp" && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        if (activeSentenceIndex > 1) handlePortraitCardClick(activeSentenceIndex - 1);
+        return;
+      }
+      if (e.key === "ArrowDown" && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        if (activeSentenceIndex < currentSentences.length) handlePortraitCardClick(activeSentenceIndex + 1);
+        return;
+      }
+    });
 
     // Zoom controls for PDF
     const pPdfWrapper = document.getElementById("p-pdf-wrapper");
@@ -1375,8 +2370,12 @@
       }
       const cleaned = text.replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim();
       currentFocusTextCleaned = cleaned;
-      if (cachedTranslation || portraitTranslations[cleaned]) {
-        pFocusTransText.textContent = cachedTranslation || portraitTranslations[cleaned];
+      const validCached = isValidChineseTranslation(cleaned, cachedTranslation) ? cachedTranslation : null;
+      if (validCached) {
+        portraitTranslations[cleaned] = validCached;
+      }
+      if (isValidChineseTranslation(cleaned, portraitTranslations[cleaned])) {
+        pFocusTransText.textContent = portraitTranslations[cleaned];
       } else {
         pFocusTransText.textContent = "正在获取中文释义...";
         fetchPortraitTranslation(cleaned);
@@ -1387,7 +2386,9 @@
       if (!text) return "";
       const cleaned = text.replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim();
       if (!cleaned) return "";
-      if (portraitTranslations[cleaned]) return portraitTranslations[cleaned];
+      if (isValidChineseTranslation(cleaned, portraitTranslations[cleaned])) {
+        return portraitTranslations[cleaned];
+      }
 
       try {
         const res = await fetch("/api/translate", {
@@ -1397,7 +2398,7 @@
         });
         if (res.ok) {
           const data = await res.json();
-          if (data.translation) {
+          if (isValidChineseTranslation(cleaned, data.translation)) {
             portraitTranslations[cleaned] = data.translation;
             if (currentFocusTextCleaned === cleaned && pFocusTransText) {
               pFocusTransText.textContent = data.translation;
@@ -1408,6 +2409,10 @@
         }
       } catch (err) {
         console.warn("Portrait translation fetch failed:", err);
+      }
+
+      if (currentFocusTextCleaned === cleaned && pFocusTransText) {
+        pFocusTransText.textContent = "暂无中文释义";
       }
       return "";
     }
@@ -1471,9 +2476,16 @@
       const body = document.querySelector(".portrait-body");
       if (!pdfPanel || !resizer || !body) return;
 
-      const savedTopH = parseInt(localStorage.getItem("ai_coach_portrait_top_h"), 10);
-      if (savedTopH && savedTopH >= 120 && savedTopH <= window.innerHeight - 180) {
-        pdfPanel.style.height = savedTopH + "px";
+      if (docHasMedia) {
+        const savedVideoH = parseInt(localStorage.getItem("ai_coach_portrait_video_h"), 10);
+        if (savedVideoH && savedVideoH >= 120 && savedVideoH <= window.innerHeight - 180) {
+          pdfPanel.style.height = savedVideoH + "px";
+        }
+      } else {
+        const savedTopH = parseInt(localStorage.getItem("ai_coach_portrait_pdf_h") || localStorage.getItem("ai_coach_portrait_top_h"), 10);
+        if (savedTopH && savedTopH >= 120 && savedTopH <= window.innerHeight - 180) {
+          pdfPanel.style.height = savedTopH + "px";
+        }
       }
 
       let isDragging = false;
@@ -1501,17 +2513,1208 @@
         document.body.classList.remove("is-resizing", "is-resizing-v");
         try { resizer.releasePointerCapture(e.pointerId); } catch (_) {}
         const h = parseInt(pdfPanel.style.height, 10);
-        if (h) localStorage.setItem("ai_coach_portrait_top_h", h);
+        if (h) {
+          if (docHasMedia) {
+            localStorage.setItem("ai_coach_portrait_video_h", h);
+          } else {
+            localStorage.setItem("ai_coach_portrait_pdf_h", h);
+            localStorage.setItem("ai_coach_portrait_top_h", h);
+          }
+        }
       };
 
       resizer.addEventListener("pointerup", finish);
       resizer.addEventListener("pointercancel", finish);
     }
 
+    // =========================================================================
+    // Portrait Shadow Typing & Gamification Engine
+    // =========================================================================
+    let pCurrentTypingTarget = "";
+    let pTypedBuffer = "";
+    let pIsTypingCompleted = false;
+    let pTypingRound = 1;
+    let pRepeatRounds = parseInt(localStorage.getItem("ai_coach_repeat_rounds"), 10) || 1;
+    let pCombo = 0;
+    let pMaxCombo = 0;
+    let pTypingStartTime = null;
+    let pLastTypedLength = 0;
+    const pCompletedWords = new Set();
+    let pCurrentSentenceWords = [];
+    let pLastSpokenWordIdx = -1;
+    let pIsWordAudioEnabled = localStorage.getItem("ai_coach_word_audio") !== "false";
+    let pIsWordTransEnabled = localStorage.getItem("ai_coach_word_trans") !== "false";
+    let pTypingDock = localStorage.getItem("english_coach_typing_dock") || "landscape";
+    let pNotesDock = localStorage.getItem("english_coach_notes_dock") || "landscape";
+    let pViewMode = localStorage.getItem("english_coach_portrait_view") || "split";
+    let pCurrentNotesMarkdown = "";
+    const pWordAudioEl = new Audio();
+
+    function renderMarkdownSafe(mdText) {
+      if (!mdText) return "";
+      if (typeof marked !== "undefined" && marked.parse) {
+        try {
+          const template = document.createElement("template");
+          template.innerHTML = marked.parse(mdText);
+          template.content
+            .querySelectorAll("script, iframe, object, embed, style, link, meta, base, form, img, video, audio, source, svg, math")
+            .forEach(node => node.remove());
+          template.content.querySelectorAll("*").forEach(node => {
+            [...node.attributes].forEach(attr => {
+              const name = attr.name.toLowerCase();
+              const value = attr.value.trim().toLowerCase();
+              if (name.startsWith("on") || name === "srcdoc" ||
+                  ((name === "href" || name === "src") && /^(javascript:|data:|vbscript:)/.test(value))) {
+                node.removeAttribute(attr.name);
+              }
+            });
+          });
+          const wrapper = document.createElement("div");
+          wrapper.appendChild(template.content);
+          return wrapper.innerHTML;
+        } catch (_) {
+          return escapeHtml(mdText);
+        }
+      }
+      return escapeHtml(mdText);
+    }
+
+    function renderPortraitWhiteboard(mdText) {
+      pCurrentNotesMarkdown = mdText || "";
+      const contentEl = document.getElementById("p-notes-content");
+      if (!contentEl) return;
+      if (!pCurrentNotesMarkdown.trim()) {
+        contentEl.innerHTML = '<div class="empty-prompt">等待导师讲解生成板书笔记…</div>';
+        return;
+      }
+      contentEl.innerHTML = renderMarkdownSafe(pCurrentNotesMarkdown);
+      // Make vocabulary clickable for pronunciation
+      contentEl.querySelectorAll("strong").forEach(strong => {
+        const raw = strong.textContent || "";
+        if (/[\u4e00-\u9fff]/.test(raw)) return;
+        const clean = raw.replace(/^[\[\(`'"\s]+|[\]\)`'"\s.,:;!?]+$/g, '').trim();
+        if (clean && clean.length >= 2 && /^[a-zA-Z\s'-]+$/.test(clean)) {
+          strong.classList.add("vocab-word-clickable");
+          strong.dataset.word = clean;
+          strong.title = `点击听 "${clean}" 发音`;
+        }
+      });
+      const badge = document.getElementById("p-notes-status-badge");
+      if (badge) {
+        if (isNotesFullscreen) {
+          badge.textContent = isLandscapeTypingFullscreen ? "⚡ 主屏全屏跟打联动中" : "⛶ 全屏智能板书";
+          badge.classList.add("active");
+        } else {
+          badge.textContent = "已实时同步";
+          badge.classList.remove("active");
+        }
+      }
+      if (currentSentences && activeSentenceIndex) {
+        const targetSent = currentSentences.find(s => s.index === activeSentenceIndex);
+        if (targetSent && targetSent.text) {
+          const cleanedText = (targetSent.text || "").replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim();
+          if (cleanedText && pCurrentNotesMarkdown.trim()) {
+            portraitNotesCache[cleanedText] = pCurrentNotesMarkdown;
+          }
+        }
+      }
+    }
+
+    const portraitNotesCache = {};
+    let isPortraitNotesLoading = false;
+
+    async function fetchPortraitSmartNotes(forceRefresh = false) {
+      if (!currentSentences || !activeSentenceIndex) return;
+      const targetSent = currentSentences.find(s => s.index === activeSentenceIndex);
+      if (!targetSent || !targetSent.text) return;
+
+      const cleanedText = (targetSent.text || "").replace(/[\u00a0\u202f\u2009\u3000]/g, " ").replace(/\s+/g, " ").trim();
+      if (!cleanedText) return;
+
+      if (!forceRefresh && portraitNotesCache[cleanedText]) {
+        renderPortraitWhiteboard(portraitNotesCache[cleanedText]);
+        return;
+      }
+
+      if (isPortraitNotesLoading && !forceRefresh) return;
+      isPortraitNotesLoading = true;
+
+      const contentEl = document.getElementById("p-notes-content");
+      const genBtn = document.getElementById("p-notes-gen-btn");
+      const badge = document.getElementById("p-notes-status-badge");
+
+      if (contentEl) {
+        contentEl.innerHTML = `
+          <div class="empty-prompt" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 40px 16px;">
+            <div style="font-size: 24px; animation: pulse-dot 1.5s infinite ease-in-out;">⚡</div>
+            <div style="font-size: 13.5px; font-weight: 600; color: #38bdf8;">正在通过云端 AI 提炼句法骨架与生词精讲…</div>
+            <div style="font-size: 11.5px; color: #94a3b8; max-width: 260px; line-height: 1.5; text-align: center;">长难句树状拆解与核心词汇全覆盖</div>
+          </div>
+        `;
+      }
+      if (badge) {
+        badge.textContent = "⚡ AI 生成中…";
+        badge.classList.add("active");
+      }
+      if (genBtn) {
+        genBtn.disabled = true;
+        genBtn.textContent = "⏳ 生成中…";
+      }
+
+      const cachedTrans = portraitTranslations[cleanedText] || targetSent.translation || "";
+
+      try {
+        const resp = await fetch("/api/sentence/smart-notes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sentence: cleanedText,
+            translation: cachedTrans,
+            force_refresh: !!forceRefresh
+          })
+        });
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (data.success && data.notes_markdown) {
+          portraitNotesCache[cleanedText] = data.notes_markdown;
+          renderPortraitWhiteboard(data.notes_markdown);
+          try {
+            syncChannel.postMessage({
+              type: "notes_update",
+              data: {
+                notes: data.notes_markdown,
+                sentence: cleanedText
+              }
+            });
+          } catch (_) {}
+        } else {
+          throw new Error(data.error || "生成失败");
+        }
+      } catch (err) {
+        console.error("Portrait smart notes failed:", err);
+        if (contentEl) {
+          contentEl.innerHTML = `
+            <div class="empty-prompt" style="padding: 24px 16px;">
+              <div style="color: #ef4444; font-size: 22px; margin-bottom: 6px;">⚠️</div>
+              <div style="font-size: 13px; font-weight: 600; color: #f87171;">智能板书生成失败</div>
+              <div style="font-size: 11.5px; color: #94a3b8; margin: 4px 0 10px 0;">${escapeHtml(err.message || "请求超时")}</div>
+              <button class="btn btn-xs btn-outline" id="retry-portrait-notes-btn">重试生成</button>
+            </div>
+          `;
+          const retryBtn = document.getElementById("retry-portrait-notes-btn");
+          if (retryBtn) {
+            retryBtn.addEventListener("click", () => fetchPortraitSmartNotes(true));
+          }
+        }
+      } finally {
+        isPortraitNotesLoading = false;
+        if (genBtn) {
+          genBtn.disabled = false;
+          genBtn.textContent = "⚡ 生成板书";
+        }
+        if (badge && !isNotesFullscreen) {
+          badge.textContent = "已同步";
+          badge.classList.remove("active");
+        }
+      }
+    }
+
+    // Web Audio Sound Engine for Portrait
+    const PortraitSoundEngine = {
+      ctx: null,
+      enabled: localStorage.getItem("ai_coach_sound_effects") !== "false",
+      init() {
+        if (!this.ctx) {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (AudioCtx) this.ctx = new AudioCtx();
+        }
+        if (this.ctx && this.ctx.state === "suspended") {
+          this.ctx.resume();
+        }
+      },
+      toggle() {
+        this.enabled = !this.enabled;
+        localStorage.setItem("ai_coach_sound_effects", this.enabled ? "true" : "false");
+        const btn = document.getElementById("p-typing-sound-btn");
+        if (btn) {
+          btn.textContent = this.enabled ? "🔊" : "🔇";
+          btn.title = this.enabled ? "敲击音效开关 (开启中)" : "敲击音效开关 (已静音)";
+        }
+      },
+      playKeyClick() {
+        if (!this.enabled) return;
+        try {
+          this.init();
+          if (!this.ctx) return;
+          const now = this.ctx.currentTime;
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = "sine";
+          const freq = 680 + (Math.random() * 40 - 20);
+          osc.frequency.setValueAtTime(freq, now);
+          osc.frequency.exponentialRampToValueAtTime(freq * 0.5, now + 0.02);
+          gain.gain.setValueAtTime(0.05, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.02);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start(now);
+          osc.stop(now + 0.02);
+        } catch (_) {}
+      },
+      playErrorThud() {
+        if (!this.enabled) return;
+        try {
+          this.init();
+          if (!this.ctx) return;
+          const now = this.ctx.currentTime;
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = "sawtooth";
+          osc.frequency.setValueAtTime(140, now);
+          osc.frequency.exponentialRampToValueAtTime(70, now + 0.05);
+          gain.gain.setValueAtTime(0.06, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start(now);
+          osc.stop(now + 0.05);
+        } catch (_) {}
+      },
+      playSuccessChime() {
+        if (!this.enabled) return;
+        try {
+          this.init();
+          if (!this.ctx) return;
+          const now = this.ctx.currentTime;
+          const notes = [523.25, 659.25, 783.99, 1046.50];
+          notes.forEach((freq, idx) => {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            osc.type = "sine";
+            const noteTime = now + (idx * 0.07);
+            osc.frequency.setValueAtTime(freq, noteTime);
+            gain.gain.setValueAtTime(0.1, noteTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, noteTime + 0.3);
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.start(noteTime);
+            osc.stop(noteTime + 0.3);
+          });
+        } catch (_) {}
+      }
+    };
+
+    // Confetti Engine for Portrait Screen
+    const PortraitConfettiEngine = {
+      fireConfetti() {
+        const colors = ["#38bdf8", "#4ade80", "#fbbf24", "#a855f7", "#f43f5e"];
+        const count = 32;
+        for (let i = 0; i < count; i++) {
+          const el = document.createElement("div");
+          el.style.position = "fixed";
+          el.style.left = `${35 + Math.random() * 30}%`;
+          el.style.bottom = `${35 + Math.random() * 20}%`;
+          el.style.width = `${6 + Math.random() * 6}px`;
+          el.style.height = `${8 + Math.random() * 8}px`;
+          el.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+          el.style.borderRadius = "2px";
+          el.style.zIndex = "9999";
+          el.style.pointerEvents = "none";
+          el.style.transform = `rotate(${Math.random() * 360}deg)`;
+          el.style.transition = "transform 0.9s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.9s ease";
+          document.body.appendChild(el);
+
+          const angle = (Math.random() * 360) * (Math.PI / 180);
+          const dist = 100 + Math.random() * 220;
+          const tx = Math.cos(angle) * dist;
+          const ty = Math.sin(angle) * dist - 60;
+
+          requestAnimationFrame(() => {
+            el.style.transform = `translate(${tx}px, ${ty}px) rotate(${Math.random() * 720}deg)`;
+            el.style.opacity = "0";
+          });
+
+          setTimeout(() => {
+            if (el.parentNode) el.parentNode.removeChild(el);
+          }, 950);
+        }
+      }
+    };
+
+    // Odometer Engine for Portrait Screen
+    const PortraitOdometerEngine = {
+      totalWords: 0,
+      todayWords: 0,
+      uniqueWords: 0,
+      pendingWords: [],
+      flushTimer: null,
+      recordWord(cleanWord) {
+        if (!cleanWord || typeof cleanWord !== "string") return;
+        const trimmed = cleanWord.trim();
+        if (!trimmed) return;
+        this.totalWords++;
+        this.todayWords++;
+        this.updateDisplays();
+        this.pendingWords.push({ word: trimmed, docId: currentDocId, sentIdx: activeSentenceIndex });
+        if (this.pendingWords.length >= 5) {
+          this.flush();
+        } else {
+          if (this.flushTimer) clearTimeout(this.flushTimer);
+          this.flushTimer = setTimeout(() => this.flush(), 800);
+        }
+      },
+      updateDisplays() {
+        const valEl = document.getElementById("p-typing-odometer-val");
+        if (valEl) valEl.textContent = this.totalWords.toLocaleString("en-US");
+      },
+      async flush() {
+        if (this.flushTimer) {
+          clearTimeout(this.flushTimer);
+          this.flushTimer = null;
+        }
+        if (this.pendingWords.length === 0) return;
+        const batch = [...this.pendingWords];
+        this.pendingWords = [];
+        try {
+          const wordsList = batch.map(b => b.word);
+          const res = await fetch("/api/game/odometer/record", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              words: wordsList,
+              document_id: currentDocId,
+              sentence_index: activeSentenceIndex
+            })
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.total_words !== undefined) {
+              this.totalWords = Math.max(this.totalWords, data.total_words);
+              if (data.today_words !== undefined) this.todayWords = Math.max(this.todayWords, data.today_words);
+              if (data.unique_words !== undefined) this.uniqueWords = data.unique_words;
+              this.updateDisplays();
+              try {
+                syncChannel.postMessage({
+                  type: "odometer_updated",
+                  data: {
+                    total_words: this.totalWords,
+                    today_words: this.todayWords,
+                    unique_words: this.uniqueWords
+                  }
+                });
+              } catch (_) {}
+            }
+          }
+        } catch (_) {}
+      }
+    };
+
+    function normalizeTypingChar(ch) {
+      if (!ch) return "";
+      if (ch === "’" || ch === "‘" || ch === "‛" || ch === "′" || ch === "`") return "'";
+      if (ch === "“" || ch === "”" || ch === "‟" || ch === "″") return '"';
+      if (ch === "–" || ch === "—" || ch === "−" || ch === "‒") return "-";
+      if (ch === "\u00a0" || ch === "\u202f" || ch === "\u2009" || ch === "\u3000") return " ";
+      if (ch === "…") return ".";
+      return ch;
+    }
+
+    function areTypingCharsEqual(a, b) {
+      if (a === b) return true;
+      return normalizeTypingChar(a) === normalizeTypingChar(b);
+    }
+
+    function parseSentenceWords(sentence) {
+      if (!sentence) return [];
+      const words = [];
+      const regex = /[a-zA-Z0-9]+(?:['’\-][a-zA-Z0-9]+)*/g;
+      let match;
+      while ((match = regex.exec(sentence)) !== null) {
+        const rawWord = match[0];
+        const startIndex = match.index;
+        const endIndex = startIndex + rawWord.length;
+        const cleanWord = rawWord.replace(/[’‘]/g, "'").trim();
+        if (cleanWord.length > 0) {
+          words.push({ raw: rawWord, clean: cleanWord, startIndex, endIndex });
+        }
+      }
+      return words;
+    }
+
+    function playPortraitWordAudio(cleanWord) {
+      if (!pIsWordAudioEnabled || !cleanWord) return;
+      const url = `/api/tts?text=${encodeURIComponent(cleanWord)}&voice=en-US-JennyNeural&speed=1.0`;
+      pWordAudioEl.src = url;
+      pWordAudioEl.play().catch(() => {});
+    }
+
+    function scrollPortraitTypingTargetToActiveChar() {
+      const display = document.getElementById("p-typing-target-display");
+      if (!display) return;
+      if (display.clientHeight <= 0 || display.scrollHeight <= display.clientHeight) return;
+      const activeSpan = display.querySelector(".char-current") || display.querySelector("span[data-idx]:last-child");
+      if (!activeSpan) return;
+
+      const displayRect = display.getBoundingClientRect();
+      const spanRect = activeSpan.getBoundingClientRect();
+      const currentScrollTop = display.scrollTop;
+      const visibleHeight = display.clientHeight;
+
+      const spanContentTop = (spanRect.top - displayRect.top) + currentScrollTop;
+      const spanContentBottom = (spanRect.bottom - displayRect.top) + currentScrollTop;
+      const spanHeight = spanRect.height || 32;
+      const bottomPadding = Math.min(visibleHeight * 0.45, Math.max(spanHeight * 1.25, 40));
+      const topPadding = Math.min(visibleHeight * 0.25, Math.max(spanHeight * 0.5, 18));
+
+      let targetScrollTop = currentScrollTop;
+      if (spanContentBottom > currentScrollTop + visibleHeight - bottomPadding) {
+        targetScrollTop = spanContentBottom - visibleHeight + bottomPadding;
+      } else if (spanContentTop < currentScrollTop + topPadding) {
+        targetScrollTop = spanContentTop - topPadding;
+      }
+      targetScrollTop = Math.max(0, Math.min(targetScrollTop, display.scrollHeight - visibleHeight));
+      if (Math.abs(targetScrollTop - currentScrollTop) > 3) {
+        display.scrollTo({ top: targetScrollTop, behavior: "smooth" });
+      }
+    }
+
+    function setupPortraitShadowTyping(targetText, translation = null) {
+      const display = document.getElementById("p-typing-target-display");
+      const pill = document.getElementById("p-typing-status-pill");
+      const progressText = document.getElementById("p-typing-progress-text");
+      const card = document.getElementById("p-shadow-typing-card");
+      const comboBadge = document.getElementById("p-typing-combo-badge");
+      const wpmBadge = document.getElementById("p-typing-wpm-badge");
+      const pageNum = document.getElementById("p-studio-page-num");
+      const sentLabel = document.getElementById("p-sent-progress-label");
+
+      if (!display) return;
+
+      if (pageNum) pageNum.textContent = `P. ${currentPage}`;
+      if (sentLabel && currentSentences) sentLabel.textContent = `第 ${activeSentenceIndex} / ${currentSentences.length} 句`;
+
+      pCurrentTypingTarget = (targetText || "")
+        .replace(/[\u00a0\u202f\u2009\u3000]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      pIsTypingCompleted = false;
+      pTypingRound = 1;
+      pCombo = 0;
+      pMaxCombo = 0;
+      pTypingStartTime = null;
+      pLastTypedLength = 0;
+      pTypedBuffer = "";
+      pCompletedWords.clear();
+      pCurrentSentenceWords = parseSentenceWords(pCurrentTypingTarget);
+      pLastSpokenWordIdx = -1;
+
+      if (comboBadge) {
+        comboBadge.textContent = "Combo x0 🔥";
+        comboBadge.className = "typing-combo-badge";
+      }
+      if (wpmBadge) wpmBadge.textContent = "0 WPM";
+      if (card) card.classList.remove("completed");
+
+      if (!pCurrentTypingTarget) {
+        display.innerHTML = '<span class="char-pending">暂无可练习的句子</span>';
+        if (pill) { pill.className = "typing-status-pill"; pill.textContent = "待打字"; }
+        if (progressText) progressText.textContent = "进度: 0 / 0 字符";
+        return;
+      }
+
+      if (pill) {
+        pill.className = "typing-status-pill";
+        pill.textContent = pRepeatRounds > 1 ? `点击开始跟打 (共需 ${pRepeatRounds} 遍)` : "点击开始跟打";
+      }
+      if (progressText) {
+        progressText.textContent = pRepeatRounds > 1
+          ? `进度: 0 / ${pCurrentTypingTarget.length} 字符 (第 1/${pRepeatRounds} 遍)`
+          : `进度: 0 / ${pCurrentTypingTarget.length} 字符`;
+      }
+
+      display.innerHTML = pCurrentTypingTarget
+        .split("")
+        .map((ch, idx) => `<span class="${idx === 0 ? 'char-current' : 'char-pending'}" data-idx="${idx}">${escapeHtml(ch)}</span>`)
+        .join("");
+      display.scrollTop = 0;
+
+      const autoToggle = document.getElementById("p-auto-typing-toggle");
+      if (autoToggle && autoToggle.checked && pTypingDock === "portrait") {
+        setTimeout(() => {
+          try { display.focus(); } catch (_) {}
+        }, 120);
+      }
+    }
+
+    function handlePortraitTypingInput() {
+      const typed = pTypedBuffer;
+      const display = document.getElementById("p-typing-target-display");
+      const pill = document.getElementById("p-typing-status-pill");
+      const progressText = document.getElementById("p-typing-progress-text");
+      const card = document.getElementById("p-shadow-typing-card");
+      const comboBadge = document.getElementById("p-typing-combo-badge");
+      const wpmBadge = document.getElementById("p-typing-wpm-badge");
+      if (!display || !pCurrentTypingTarget) return;
+
+      if (!pTypingStartTime && typed.length > 0) {
+        pTypingStartTime = Date.now();
+      }
+
+      const spans = display.querySelectorAll("span[data-idx]");
+      let correctCount = 0;
+      let hasError = false;
+
+      for (let i = 0; i < spans.length; i++) {
+        const span = spans[i];
+        const targetChar = pCurrentTypingTarget[i];
+        if (i < typed.length) {
+          if (areTypingCharsEqual(typed[i], targetChar)) {
+            span.className = "char-correct";
+            correctCount++;
+          } else {
+            span.className = "char-wrong";
+            hasError = true;
+          }
+        } else if (i === typed.length) {
+          span.className = "char-current";
+        } else {
+          span.className = "char-pending";
+        }
+      }
+
+      scrollPortraitTypingTargetToActiveChar();
+
+      // Hit audio & combo
+      if (typed.length > pLastTypedLength) {
+        const charIndex = typed.length - 1;
+        if (pIsWordAudioEnabled && pCurrentSentenceWords.length > 0) {
+          const wordIdx = pCurrentSentenceWords.findIndex(w => charIndex >= w.startIndex && charIndex < w.endIndex);
+          if (wordIdx !== -1 && wordIdx !== pLastSpokenWordIdx) {
+            pLastSpokenWordIdx = wordIdx;
+            playPortraitWordAudio(pCurrentSentenceWords[wordIdx].clean);
+          }
+        }
+
+        if (charIndex < pCurrentTypingTarget.length && areTypingCharsEqual(typed[charIndex], pCurrentTypingTarget[charIndex])) {
+          pCombo++;
+          if (pCombo > pMaxCombo) pMaxCombo = pCombo;
+          PortraitSoundEngine.playKeyClick();
+        } else {
+          pCombo = 0;
+          PortraitSoundEngine.playErrorThud();
+        }
+      }
+      pLastTypedLength = typed.length;
+
+      // Track completed words for Odometer
+      if (pCurrentSentenceWords.length > 0) {
+        for (let i = 0; i < pCurrentSentenceWords.length; i++) {
+          if (!pCompletedWords.has(i)) {
+            const w = pCurrentSentenceWords[i];
+            if (typed.length >= w.endIndex) {
+              let allCorrect = true;
+              for (let k = w.startIndex; k < w.endIndex; k++) {
+                if (!areTypingCharsEqual(typed[k], pCurrentTypingTarget[k])) {
+                  allCorrect = false;
+                  break;
+                }
+              }
+              if (allCorrect) {
+                pCompletedWords.add(i);
+                PortraitOdometerEngine.recordWord(w.clean);
+              }
+            }
+          }
+        }
+      }
+
+      // Combo badge
+      if (comboBadge) {
+        comboBadge.textContent = `Combo x${pCombo} 🔥`;
+        if (pCombo >= 10) comboBadge.className = "typing-combo-badge super";
+        else if (pCombo >= 3) comboBadge.className = "typing-combo-badge active";
+        else comboBadge.className = "typing-combo-badge";
+      }
+
+      // WPM
+      let wpm = 0;
+      if (pTypingStartTime && typed.length > 0) {
+        const elapsedSec = (Date.now() - pTypingStartTime) / 1000;
+        if (elapsedSec > 0.6) {
+          const words = typed.length / 5;
+          wpm = Math.round((words / elapsedSec) * 60);
+          if (wpmBadge) wpmBadge.textContent = `${wpm} WPM`;
+        }
+      }
+
+      if (progressText) {
+        progressText.textContent = pRepeatRounds > 1
+          ? `进度: ${correctCount} / ${pCurrentTypingTarget.length} 字符 (第 ${pTypingRound}/${pRepeatRounds} 遍)`
+          : `进度: ${correctCount} / ${pCurrentTypingTarget.length} 字符`;
+      }
+
+      if (hasError) {
+        if (pill) { pill.className = "typing-status-pill"; pill.textContent = "存在拼写错误"; }
+      } else if (typed.length > 0 && typed.length < pCurrentTypingTarget.length) {
+        if (pill) {
+          pill.className = "typing-status-pill active";
+          pill.textContent = pRepeatRounds > 1
+            ? `跟打中 (第 ${pTypingRound}/${pRepeatRounds} 遍)…`
+            : `跟打中…`;
+        }
+      }
+
+      // Broadcast sync to landscape
+      try {
+        syncChannel.postMessage({
+          type: "typing_sync",
+          data: {
+            source: "portrait",
+            sentence_index: activeSentenceIndex,
+            target: pCurrentTypingTarget,
+            typed: pTypedBuffer,
+            combo: pCombo,
+            wpm: wpm,
+            completed: false,
+            round: pTypingRound,
+            repeatRounds: pRepeatRounds
+          }
+        });
+      } catch (_) {}
+
+      // Completion check
+      const isMatch = (typed.length === pCurrentTypingTarget.length && !hasError);
+      if (isMatch && !pIsTypingCompleted) {
+        if (pTypingRound < pRepeatRounds) {
+          PortraitSoundEngine.playSuccessChime();
+          pTypingRound++;
+          pTypedBuffer = "";
+          pLastTypedLength = 0;
+          pLastSpokenWordIdx = -1;
+          pCompletedWords.clear();
+          display.innerHTML = pCurrentTypingTarget
+            .split("")
+            .map((ch, idx) => `<span class="${idx === 0 ? 'char-current' : 'char-pending'}" data-idx="${idx}">${escapeHtml(ch)}</span>`)
+            .join("");
+          display.scrollTop = 0;
+          if (pill) {
+            pill.className = "typing-status-pill active";
+            pill.textContent = `第 ${pTypingRound - 1} 遍完成，继续第 ${pTypingRound} 遍`;
+          }
+          if (progressText) {
+            progressText.textContent = `进度: 0 / ${pCurrentTypingTarget.length} 字符 (第 ${pTypingRound}/${pRepeatRounds} 遍)`;
+          }
+          display.focus();
+          return;
+        }
+
+        pIsTypingCompleted = true;
+        if (pill) {
+          pill.className = "typing-status-pill success";
+          pill.textContent = pRepeatRounds > 1 ? `✓ 连续 ${pRepeatRounds} 遍跟打通关！` : "✓ 完美跟打达成！";
+        }
+        if (card) card.classList.add("completed");
+        PortraitSoundEngine.playSuccessChime();
+        if (pMaxCombo >= 8 || pRepeatRounds > 1) {
+          PortraitConfettiEngine.fireConfetti();
+        }
+        PortraitOdometerEngine.flush();
+
+        const wordCount = pCurrentTypingTarget.split(/\s+/).filter(Boolean).length;
+        fetch("/api/game/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action_type: "typing_completed",
+            words_count: wordCount * pRepeatRounds,
+            combo: pMaxCombo,
+            increment_words: false
+          })
+        }).then(r => r.json()).then(data => {
+          if (data && data.result) {
+            updatePortraitHud(data.result.status);
+          }
+        }).catch(() => {});
+
+        try {
+          syncChannel.postMessage({
+            type: "typing_completed",
+            data: { sentence_index: activeSentenceIndex, rounds: pRepeatRounds }
+          });
+          syncChannel.postMessage({
+            type: "typing_sync",
+            data: {
+              source: "portrait",
+              sentence_index: activeSentenceIndex,
+              target: pCurrentTypingTarget,
+              typed: pTypedBuffer,
+              combo: pCombo,
+              wpm: wpm,
+              completed: true,
+              round: pTypingRound,
+              repeatRounds: pRepeatRounds
+            }
+          });
+        } catch (_) {}
+
+        if (isContinuousActive) {
+          setTimeout(() => {
+            if (!isContinuousActive) return;
+            if (currentSentences && activeSentenceIndex < currentSentences.length) {
+              selectSentence(activeSentenceIndex + 1, true);
+            }
+          }, 1400);
+        }
+      }
+    }
+
+    function mirrorLandscapeTyping(data) {
+      if (!data) return;
+      const display = document.getElementById("p-typing-target-display");
+      const comboBadge = document.getElementById("p-typing-combo-badge");
+      const wpmBadge = document.getElementById("p-typing-wpm-badge");
+      const pill = document.getElementById("p-typing-status-pill");
+
+      if (comboBadge && data.combo !== undefined) {
+        comboBadge.textContent = `Combo x${data.combo} 🔥`;
+        comboBadge.className = data.combo >= 10 ? "typing-combo-badge super" : (data.combo >= 3 ? "typing-combo-badge active" : "typing-combo-badge");
+      }
+      if (wpmBadge && data.wpm !== undefined) {
+        wpmBadge.textContent = `${data.wpm} WPM`;
+      }
+      if (display && data.target && data.typed !== undefined) {
+        const target = data.target;
+        const typed = data.typed;
+        display.innerHTML = target.split("").map((ch, idx) => {
+          let cls = "char-pending";
+          if (idx < typed.length) {
+            cls = areTypingCharsEqual(typed[idx], ch) ? "char-correct" : "char-wrong";
+          } else if (idx === typed.length) {
+            cls = "char-current";
+          }
+          return `<span class="${cls}" data-idx="${idx}">${escapeHtml(ch)}</span>`;
+        }).join("");
+      }
+      if (data.completed) {
+        const card = document.getElementById("p-shadow-typing-card");
+        if (card) card.classList.add("completed");
+        if (pill) { pill.className = "typing-status-pill success"; pill.textContent = "✓ 完美跟打达成！"; }
+      }
+    }
+
+    function setPortraitTypingDock(dock, broadcast = true) {
+      pTypingDock = dock;
+      localStorage.setItem("english_coach_typing_dock", dock);
+      const card = document.getElementById("p-shadow-typing-card");
+      const navDockBtn = document.getElementById("p-typing-dock-btn");
+      const ctrlTypingBtn = document.getElementById("p-ctrl-typing");
+
+      const isPortrait = (dock === "portrait");
+      if (card) {
+        card.style.display = isPortrait ? "flex" : "none";
+      }
+      if (navDockBtn) {
+        navDockBtn.textContent = isPortrait ? "⌨️ 竖屏跟打中 (移回)" : "⌨️ 竖屏跟打";
+        navDockBtn.classList.toggle("active", isPortrait);
+        navDockBtn.classList.toggle("btn-primary", isPortrait);
+        navDockBtn.classList.toggle("btn-outline", !isPortrait);
+      }
+      if (ctrlTypingBtn) {
+        ctrlTypingBtn.classList.toggle("active", isPortrait);
+      }
+
+      if (isPortrait) {
+        const targetSent = currentSentences && currentSentences.find(s => s.index === activeSentenceIndex);
+        if (targetSent) {
+          setupPortraitShadowTyping(targetSent.text);
+        }
+      }
+
+      if (broadcast) {
+        try {
+          syncChannel.postMessage({
+            type: "typing_dock_change",
+            data: { dock }
+          });
+        } catch (_) {}
+      }
+    }
+
+    function setPortraitNotesDock(dock, broadcast = true) {
+      pNotesDock = dock;
+      localStorage.setItem("english_coach_notes_dock", dock);
+      const notesContainer = document.getElementById("p-notes-container");
+      const navNotesBtn = document.getElementById("p-notes-dock-btn");
+      const ctrlNotesBtn = document.getElementById("p-ctrl-notes");
+
+      const isPortrait = (dock === "portrait");
+      if (navNotesBtn) {
+        navNotesBtn.textContent = isPortrait ? "📝 竖屏板书中 (移回)" : "📝 竖屏板书";
+        navNotesBtn.classList.toggle("active", isPortrait);
+        navNotesBtn.classList.toggle("btn-primary", isPortrait);
+        navNotesBtn.classList.toggle("btn-outline", !isPortrait);
+      }
+      if (ctrlNotesBtn) {
+        ctrlNotesBtn.classList.toggle("active", isPortrait);
+      }
+
+      if (isPortrait) {
+        setPortraitViewMode("notes");
+      }
+
+      if (broadcast) {
+        try {
+          syncChannel.postMessage({
+            type: "notes_dock_change",
+            data: { dock }
+          });
+        } catch (_) {}
+      }
+    }
+
+    function setPortraitNotesFullscreen(active) {
+      isNotesFullscreen = !!active;
+      const body = document.getElementById("portrait-body") || document.querySelector(".portrait-body");
+      const fsBtn = document.getElementById("p-notes-fs-btn");
+      const badge = document.getElementById("p-notes-status-badge");
+
+      if (body) {
+        body.classList.toggle("notes-fullscreen-active", isNotesFullscreen);
+      }
+      document.body.classList.toggle("portrait-notes-fs", isNotesFullscreen);
+
+      if (fsBtn) {
+        fsBtn.textContent = isNotesFullscreen ? "✕ 退出全屏" : "⛶ 全屏";
+        fsBtn.classList.toggle("active", isNotesFullscreen);
+        fsBtn.title = isNotesFullscreen ? "退出全屏板书模式 (快捷键: Esc / F10)" : "全屏查看智能板书 (快捷键: F10)";
+      }
+
+      if (isNotesFullscreen) {
+        if (pViewMode !== "notes") {
+          savedViewModeBeforeFs = pViewMode;
+          setPortraitViewMode("notes");
+        }
+        if (badge) {
+          badge.textContent = isLandscapeTypingFullscreen ? "⚡ 主屏全屏跟打联动中" : "⛶ 全屏智能板书";
+          badge.classList.add("active");
+        }
+      } else {
+        if (savedViewModeBeforeFs) {
+          setPortraitViewMode(savedViewModeBeforeFs);
+          savedViewModeBeforeFs = null;
+        }
+        if (badge) {
+          badge.textContent = "已实时同步";
+          badge.classList.remove("active");
+        }
+      }
+    }
+
+    function setPortraitViewMode(mode) {
+      pViewMode = mode;
+      localStorage.setItem("english_coach_portrait_view", mode);
+      const bottomPanel = document.getElementById("sentences-bottom-panel");
+      const notesContainer = document.getElementById("p-notes-container");
+      const sentencesContainer = document.getElementById("p-sentences-container");
+      const typingCard = document.getElementById("p-shadow-typing-card");
+
+      if (bottomPanel) {
+        bottomPanel.classList.remove("view-split", "view-typing-only", "view-sentences-only", "view-notes-only");
+        if (mode === "typing") bottomPanel.classList.add("view-typing-only");
+        else if (mode === "sentences") bottomPanel.classList.add("view-sentences-only");
+        else if (mode === "notes") bottomPanel.classList.add("view-notes-only");
+        else bottomPanel.classList.add("view-split");
+      }
+
+      if (notesContainer) {
+        notesContainer.style.display = (mode === "notes") ? "flex" : "none";
+      }
+      if (sentencesContainer) {
+        sentencesContainer.style.display = (mode === "notes" || mode === "typing") ? "none" : "flex";
+      }
+      if (typingCard && pTypingDock === "portrait") {
+        typingCard.style.display = (mode === "notes" || mode === "sentences") ? "none" : "flex";
+      }
+
+      document.querySelectorAll(".p-panel-tab-btn").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.view === mode);
+      });
+    }
+
+    function updatePortraitRepeatBtn() {
+      const label = document.getElementById("p-typing-repeat-label");
+      if (label) label.textContent = `${pRepeatRounds}遍`;
+      localStorage.setItem("ai_coach_repeat_rounds", pRepeatRounds);
+    }
+
+    function initPortraitTyping() {
+      const display = document.getElementById("p-typing-target-display");
+      const navDockBtn = document.getElementById("p-typing-dock-btn");
+      const undockBtn = document.getElementById("p-undock-btn");
+      const ctrlTypingBtn = document.getElementById("p-ctrl-typing");
+      const soundBtn = document.getElementById("p-typing-sound-btn");
+      const repeatBtn = document.getElementById("p-typing-repeat-btn");
+      const wordSoundBtn = document.getElementById("p-typing-word-sound-btn");
+      const wordTransBtn = document.getElementById("p-typing-word-trans-btn");
+      const replayBtn = document.getElementById("p-typing-replay-btn");
+      const loopBtn = document.getElementById("p-typing-loop-btn");
+      const clearBtn = document.getElementById("p-typing-clear-btn");
+      const autoToggle = document.getElementById("p-auto-typing-toggle");
+
+      if (display) {
+        display.addEventListener("keydown", (e) => {
+          // Prevent spacebar from triggering page scroll or window-level actions
+          if (e.key === " ") {
+            e.preventDefault();
+          }
+
+          if (e.key === "Backspace") {
+            e.preventDefault();
+            if (pTypedBuffer.length > 0) {
+              pTypedBuffer = pTypedBuffer.slice(0, -1);
+              handlePortraitTypingInput();
+            }
+            return;
+          }
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (currentSentences && activeSentenceIndex < currentSentences.length) {
+              selectSentence(activeSentenceIndex + 1, true);
+              syncChannel.postMessage({
+                type: "sentence_change",
+                data: { sentence_index: activeSentenceIndex, auto_play: false, source: "portrait" }
+              });
+            }
+            return;
+          }
+          if (e.key === "Escape") {
+            display.blur();
+            return;
+          }
+          if (e.key.length !== 1 || e.ctrlKey || e.altKey || e.metaKey) return;
+          e.preventDefault();
+          if (pTypedBuffer.length < pCurrentTypingTarget.length) {
+            pTypedBuffer += e.key;
+            handlePortraitTypingInput();
+          }
+        });
+
+        display.addEventListener("focus", () => {
+          display.classList.add("typing-active");
+          const card = document.getElementById("p-shadow-typing-card");
+          if (card) card.classList.add("focused");
+        });
+        display.addEventListener("blur", () => {
+          display.classList.remove("typing-active");
+          const card = document.getElementById("p-shadow-typing-card");
+          if (card) card.classList.remove("focused");
+        });
+      }
+
+      if (navDockBtn) {
+        navDockBtn.addEventListener("click", () => {
+          const next = (pTypingDock === "portrait") ? "landscape" : "portrait";
+          setPortraitTypingDock(next, true);
+        });
+      }
+      if (undockBtn) {
+        undockBtn.addEventListener("click", () => {
+          setPortraitTypingDock("landscape", true);
+        });
+      }
+      if (ctrlTypingBtn) {
+        ctrlTypingBtn.addEventListener("click", () => {
+          setPortraitTypingDock("portrait", true);
+          setPortraitViewMode("split");
+        });
+      }
+
+      // Tab switcher
+      document.querySelectorAll(".p-panel-tab-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const view = btn.dataset.view;
+          if (view !== "notes" && isNotesFullscreen) {
+            setPortraitNotesFullscreen(false);
+          }
+          if (view === "typing" && pTypingDock !== "portrait") {
+            setPortraitTypingDock("portrait", true);
+          }
+          if (view === "notes" && pNotesDock !== "portrait") {
+            setPortraitNotesDock("portrait", true);
+          }
+          setPortraitViewMode(view);
+        });
+      });
+
+      if (soundBtn) {
+        soundBtn.textContent = PortraitSoundEngine.enabled ? "🔊" : "🔇";
+        soundBtn.addEventListener("click", () => PortraitSoundEngine.toggle());
+      }
+      if (repeatBtn) {
+        updatePortraitRepeatBtn();
+        repeatBtn.addEventListener("click", () => {
+          pRepeatRounds = (pRepeatRounds % 3) + 1;
+          updatePortraitRepeatBtn();
+          try {
+            syncChannel.postMessage({ type: "repeat_rounds_changed", data: { rounds: pRepeatRounds } });
+          } catch (_) {}
+          const targetSent = currentSentences && currentSentences.find(s => s.index === activeSentenceIndex);
+          if (targetSent) setupPortraitShadowTyping(targetSent.text);
+        });
+      }
+      if (wordSoundBtn) {
+        wordSoundBtn.classList.toggle("active", pIsWordAudioEnabled);
+        wordSoundBtn.addEventListener("click", () => {
+          pIsWordAudioEnabled = !pIsWordAudioEnabled;
+          localStorage.setItem("ai_coach_word_audio", pIsWordAudioEnabled ? "true" : "false");
+          wordSoundBtn.classList.toggle("active", pIsWordAudioEnabled);
+        });
+      }
+      if (wordTransBtn) {
+        wordTransBtn.classList.toggle("active", pIsWordTransEnabled);
+        wordTransBtn.addEventListener("click", () => {
+          pIsWordTransEnabled = !pIsWordTransEnabled;
+          localStorage.setItem("ai_coach_word_trans", pIsWordTransEnabled ? "true" : "false");
+          wordTransBtn.classList.toggle("active", pIsWordTransEnabled);
+        });
+      }
+      if (replayBtn) {
+        replayBtn.addEventListener("click", () => {
+          playSentenceAudioDirect(activeSentenceIndex);
+        });
+      }
+      if (loopBtn) {
+        loopBtn.addEventListener("click", () => {
+          isPortraitLoopPlayback = !isPortraitLoopPlayback;
+          loopBtn.classList.toggle("active", isPortraitLoopPlayback);
+          try {
+            syncChannel.postMessage({ type: "loop_mode", data: { loop: isPortraitLoopPlayback } });
+          } catch (_) {}
+        });
+      }
+      if (clearBtn) {
+        clearBtn.addEventListener("click", () => {
+          pTypedBuffer = "";
+          pLastTypedLength = 0;
+          pLastSpokenWordIdx = -1;
+          pCompletedWords.clear();
+          const targetSent = currentSentences && currentSentences.find(s => s.index === activeSentenceIndex);
+          if (targetSent) setupPortraitShadowTyping(targetSent.text);
+        });
+      }
+      if (autoToggle) {
+        const saved = localStorage.getItem("ai_coach_auto_typing");
+        if (saved !== null) autoToggle.checked = saved === "1";
+        autoToggle.addEventListener("change", () => {
+          localStorage.setItem("ai_coach_auto_typing", autoToggle.checked ? "1" : "0");
+        });
+      }
+
+      // Steppers inside typing card
+      const prevPageBtn = document.getElementById("p-studio-prev-page-btn");
+      const nextPageBtn = document.getElementById("p-studio-next-page-btn");
+      const prevSentBtn = document.getElementById("p-sent-prev-btn");
+      const nextSentBtn = document.getElementById("p-sent-next-btn");
+
+      if (prevPageBtn) {
+        prevPageBtn.addEventListener("click", () => {
+          if (currentPage > 1) loadPage(currentDocId, currentPage - 1, true, 1);
+        });
+      }
+      if (nextPageBtn) {
+        nextPageBtn.addEventListener("click", () => {
+          loadPage(currentDocId, currentPage + 1, true, 1);
+        });
+      }
+      if (prevSentBtn) {
+        prevSentBtn.addEventListener("click", () => {
+          if (activeSentenceIndex > 1) {
+            selectSentence(activeSentenceIndex - 1, true);
+            syncChannel.postMessage({
+              type: "sentence_change",
+              data: { sentence_index: activeSentenceIndex, auto_play: false, source: "portrait" }
+            });
+          }
+        });
+      }
+      if (nextSentBtn) {
+        nextSentBtn.addEventListener("click", () => {
+          if (currentSentences && activeSentenceIndex < currentSentences.length) {
+            selectSentence(activeSentenceIndex + 1, true);
+            syncChannel.postMessage({
+              type: "sentence_change",
+              data: { sentence_index: activeSentenceIndex, auto_play: false, source: "portrait" }
+            });
+          }
+        });
+      }
+
+      const navNotesBtn = document.getElementById("p-notes-dock-btn");
+      const undockNotesBtn = document.getElementById("p-notes-undock-btn");
+      const ctrlNotesBtn = document.getElementById("p-ctrl-notes");
+      const copyNotesBtn = document.getElementById("p-notes-copy-btn");
+      const fsNotesBtn = document.getElementById("p-notes-fs-btn");
+      const genNotesBtn = document.getElementById("p-notes-gen-btn");
+
+      if (genNotesBtn) {
+        genNotesBtn.addEventListener("click", () => {
+          fetchPortraitSmartNotes(true);
+        });
+      }
+
+      if (fsNotesBtn) {
+        fsNotesBtn.addEventListener("click", () => {
+          setPortraitNotesFullscreen(!isNotesFullscreen);
+        });
+      }
+
+      if (navNotesBtn) {
+        navNotesBtn.addEventListener("click", () => {
+          const next = (pNotesDock === "portrait") ? "landscape" : "portrait";
+          setPortraitNotesDock(next, true);
+          if (next === "portrait" && !pCurrentNotesMarkdown.trim()) {
+            fetchPortraitSmartNotes(false);
+          }
+        });
+      }
+      if (undockNotesBtn) {
+        undockNotesBtn.addEventListener("click", () => {
+          setPortraitNotesFullscreen(false);
+          setPortraitNotesDock("landscape", true);
+          setPortraitViewMode("split");
+        });
+      }
+      if (ctrlNotesBtn) {
+        ctrlNotesBtn.addEventListener("click", () => {
+          setPortraitNotesDock("portrait", true);
+          setPortraitViewMode("notes");
+          if (!pCurrentNotesMarkdown.trim()) {
+            fetchPortraitSmartNotes(false);
+          }
+        });
+      }
+      if (copyNotesBtn) {
+        copyNotesBtn.addEventListener("click", () => {
+          if (pCurrentNotesMarkdown) {
+            navigator.clipboard.writeText(pCurrentNotesMarkdown).then(() => {
+              copyNotesBtn.textContent = "✓ 已复制";
+              setTimeout(() => { copyNotesBtn.textContent = "📋 复制"; }, 1500);
+            }).catch(() => {});
+          }
+        });
+      }
+
+      setPortraitTypingDock(pTypingDock, false);
+      setPortraitNotesDock(pNotesDock, false);
+      setPortraitViewMode(pViewMode);
+    }
+
     // Start
     initDocuments();
     initPortraitTheme();
     initPortraitResizer();
+    initPortraitTyping();
     refreshPortraitGameStatus();
     try { syncChannel.postMessage({ type: "portrait_connected" }); } catch (_) {}
   </script>

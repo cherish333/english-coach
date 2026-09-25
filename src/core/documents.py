@@ -7,10 +7,11 @@ import json
 from pathlib import Path
 import re
 import threading
-from typing import Optional
+from typing import Optional, Union, List, Dict
+import shutil
 
 import pymupdf
-from src.config import VOCABULARY_PDF, GRAMMAR_PDF, WESTERN_CIV_PDF, CUSTOM_BOOKS_DIR
+from src.config import VOCABULARY_PDF, GRAMMAR_PDF, WESTERN_CIV_PDF, CUSTOM_BOOKS_DIR, MEDIA_DIR
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,9 @@ class DocumentSpec:
     unit_count: int
     first_unit_page: int = 9
     is_custom: bool = False
+    has_media: bool = False
+    media_filename: Optional[str] = None
+    media_type: Optional[str] = None
 
 
 DOCUMENT_SPECS = {
@@ -68,8 +72,31 @@ class DocumentLibrary:
         self.image_cache_size = image_cache_size
         self._documents = {}
         self._image_cache = OrderedDict()
+        self._doc_page_cursors: dict[str, dict[int, int]] = {}
         self._lock = threading.RLock()
         self._load_custom_documents()
+
+    def _get_page_cursor(self, document_id: str, page_number: int) -> int:
+        if page_number <= 1:
+            return 0
+        cursors = self._doc_page_cursors.get(document_id, {})
+        if page_number in cursors:
+            return cursors[page_number]
+        # Resolve preceding pages sequentially to populate page cursor chain
+        for p in range(1, page_number):
+            if p not in cursors:
+                try:
+                    self.get_page_sentences(document_id, p)
+                except Exception:
+                    pass
+            cursors = self._doc_page_cursors.get(document_id, {})
+        return cursors.get(page_number, 0)
+
+    def _record_page_cursor(self, document_id: str, next_page: int, cursor: int):
+        with self._lock:
+            if document_id not in self._doc_page_cursors:
+                self._doc_page_cursors[document_id] = {}
+            self._doc_page_cursors[document_id][next_page] = cursor
 
     def _load_custom_documents(self):
         CUSTOM_BOOKS_DIR.mkdir(parents=True, exist_ok=True)
@@ -104,6 +131,29 @@ class DocumentLibrary:
                     title = title or pdf_path.stem
                     unit_count = unit_count or 1
             desc = entry.get("description", f"用户上传教材 ({pdf_path.name})")
+            has_media = bool(entry.get("has_media", False))
+            media_filename = entry.get("media_filename")
+            media_type = entry.get("media_type")
+            if not has_media:
+                for ext in [".mp4", ".m4a", ".webm", ".mp3", ".ogg"]:
+                    m_cand = MEDIA_DIR / f"{doc_id}{ext}"
+                    if m_cand.is_file():
+                        has_media = True
+                        media_filename = m_cand.name
+                        if ext == ".mp4":
+                            media_type = "video/mp4"
+                        elif ext in (".m4a", ".aac"):
+                            media_type = "audio/mp4"
+                        elif ext == ".webm":
+                            media_type = "video/webm"
+                        elif ext == ".mp3":
+                            media_type = "audio/mpeg"
+                        elif ext == ".ogg":
+                            media_type = "audio/ogg"
+                        else:
+                            media_type = "application/octet-stream"
+                        break
+
             self.specs[doc_id] = DocumentSpec(
                 document_id=doc_id,
                 title=title.strip() or pdf_path.stem,
@@ -112,10 +162,22 @@ class DocumentLibrary:
                 unit_count=unit_count,
                 first_unit_page=1,
                 is_custom=True,
+                has_media=has_media,
+                media_filename=media_filename,
+                media_type=media_type,
             )
 
-    def add_custom_document(self, filename: str, content: bytes, title: Optional[str] = None, description: Optional[str] = None) -> dict:
+    def add_custom_document(
+        self,
+        filename: str,
+        content: bytes,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        media_path: Optional[Union[str, Path]] = None,
+        sentence_timestamps: Optional[List[Dict]] = None,
+    ) -> dict:
         CUSTOM_BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+        MEDIA_DIR.mkdir(parents=True, exist_ok=True)
         clean_stem = re.sub(r'[^a-zA-Z0-9_\-\u4e00-\u9fa5]', '_', Path(filename).stem)
         if not clean_stem.strip('_-'):
             clean_stem = hashlib.md5(Path(filename).stem.encode('utf-8', errors='ignore')).hexdigest()[:8]
@@ -145,6 +207,67 @@ class DocumentLibrary:
         if not clean_name.strip('_'):
             clean_name = hashlib.md5(target_path.stem.encode('utf-8', errors='ignore')).hexdigest()[:8]
         doc_id = f"custom_{clean_name}"
+        base_doc_id = doc_id
+        doc_counter = 1
+        while doc_id in self.specs:
+            doc_id = f"{base_doc_id}_{doc_counter}"
+            doc_counter += 1
+
+
+        # Resolve media file if supplied or pre-downloaded
+        has_media = False
+        media_filename = None
+        media_type = None
+
+        cand_media = None
+        if media_path and Path(media_path).is_file():
+            cand_media = Path(media_path)
+        else:
+            raw_stem = Path(filename).stem
+            for ext in [".mp4", ".m4a", ".webm", ".mp3"]:
+                for stem_cand in [raw_stem, f"staged_{raw_stem}", f"temp_{raw_stem}"]:
+                    staged = MEDIA_DIR / f"{stem_cand}{ext}"
+                    if staged.is_file():
+                        cand_media = staged
+                        break
+                if cand_media:
+                    break
+
+        if cand_media and cand_media.is_file():
+            dest_media = MEDIA_DIR / f"{doc_id}{cand_media.suffix.lower()}"
+            if cand_media.resolve() != dest_media.resolve():
+                try:
+                    shutil.move(str(cand_media), str(dest_media))
+                except Exception:
+                    try:
+                        shutil.copy2(str(cand_media), str(dest_media))
+                    except Exception:
+                        pass
+            if dest_media.is_file():
+                has_media = True
+                media_filename = dest_media.name
+                ext = dest_media.suffix.lower()
+                if ext == ".mp4":
+                    media_type = "video/mp4"
+                elif ext in (".m4a", ".aac"):
+                    media_type = "audio/mp4"
+                elif ext == ".webm":
+                    media_type = "video/webm"
+                elif ext == ".mp3":
+                    media_type = "audio/mpeg"
+                elif ext == ".ogg":
+                    media_type = "audio/ogg"
+                else:
+                    media_type = "application/octet-stream"
+
+        # Save sentence timestamps sidecar file if present
+        if sentence_timestamps:
+            sent_file = CUSTOM_BOOKS_DIR / f"{doc_id}.sentences.json"
+            try:
+                with open(sent_file, "w", encoding="utf-8") as f:
+                    json.dump(sentence_timestamps, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
 
         spec = DocumentSpec(
             document_id=doc_id,
@@ -154,10 +277,14 @@ class DocumentLibrary:
             unit_count=pages,
             first_unit_page=1,
             is_custom=True,
+            has_media=has_media,
+            media_filename=media_filename,
+            media_type=media_type,
         )
 
         with self._lock:
             self.specs[doc_id] = spec
+            self._doc_page_cursors.pop(doc_id, None)
             catalog_file = CUSTOM_BOOKS_DIR / "catalog.json"
             catalog = {}
             if catalog_file.is_file():
@@ -172,6 +299,9 @@ class DocumentLibrary:
                 "description": final_desc,
                 "unit_count": pages,
                 "first_unit_page": 1,
+                "has_media": has_media,
+                "media_filename": media_filename,
+                "media_type": media_type,
             }
             try:
                 with open(catalog_file, "w", encoding="utf-8") as f:
@@ -186,6 +316,9 @@ class DocumentLibrary:
             "pages": pages,
             "available": True,
             "is_custom": True,
+            "has_media": has_media,
+            "media_type": media_type,
+            "media_url": f"/api/documents/{doc_id}/media" if has_media else None,
         }
 
     def delete_custom_document(self, document_id: str) -> bool:
@@ -199,11 +332,32 @@ class DocumentLibrary:
             if document_id in self.specs:
                 del self.specs[document_id]
             # Evict cached rendered page images for this document
+            self._doc_page_cursors.pop(document_id, None)
             cached_keys_to_del = [k for k in self._image_cache if k[0] == document_id]
             for k in cached_keys_to_del:
                 self._image_cache.pop(k, None)
             if spec.path.exists():
                 spec.path.unlink()
+            # Delete sentence timestamps companion file
+            sent_file = CUSTOM_BOOKS_DIR / f"{document_id}.sentences.json"
+            if sent_file.exists():
+                try:
+                    sent_file.unlink()
+                except Exception:
+                    pass
+            # Delete media files
+            if getattr(spec, "media_filename", None):
+                mf = MEDIA_DIR / spec.media_filename
+                if mf.exists():
+                    try:
+                        mf.unlink()
+                    except Exception:
+                        pass
+            for m in MEDIA_DIR.glob(f"{document_id}.*"):
+                try:
+                    m.unlink()
+                except Exception:
+                    pass
             catalog_file = CUSTOM_BOOKS_DIR / "catalog.json"
             if catalog_file.exists():
                 try:
@@ -251,6 +405,9 @@ class DocumentLibrary:
                 "pages": pages,
                 "available": available,
                 "is_custom": spec.is_custom,
+                "has_media": spec.has_media,
+                "media_type": spec.media_type,
+                "media_url": f"/api/documents/{spec.document_id}/media" if spec.has_media else None,
             })
         return result
 
@@ -735,6 +892,105 @@ class DocumentLibrary:
 
             for s in final_sentences:
                 s["boxes"] = extract_sentence_boxes(s.get("text", ""))
+                s["has_media"] = False
+                s["start_time"] = None
+                s["end_time"] = None
+
+            # Attach sentence timestamps if available for this custom document
+            sent_file = CUSTOM_BOOKS_DIR / f"{document_id}.sentences.json"
+            if sent_file.is_file():
+                try:
+                    with open(sent_file, "r", encoding="utf-8") as sf:
+                        raw_meta = json.load(sf)
+                    if isinstance(raw_meta, list) and raw_meta:
+                        def _norm_s(text: str) -> str:
+                            return re.sub(r"[^a-zA-Z0-9]+", "", text).lower()
+
+                        has_page_field = any(isinstance(item, dict) and "page" in item for item in raw_meta)
+                        if has_page_field:
+                            raw_meta_target = [
+                                item for item in raw_meta
+                                if isinstance(item, dict) and item.get("page") == page_number
+                            ]
+                        else:
+                            raw_meta_target = raw_meta
+
+                        meta_entries = [
+                            {
+                                "norm": _norm_s(item.get("text", "")),
+                                "words": _norm_s(" ".join((item.get("text", "")).split()[:6])),
+                                "start_time": float(item.get("start_time", 0.0)),
+                                "end_time": float(item.get("end_time", 0.0)),
+                                "item": item,
+                            }
+                            for item in raw_meta_target
+                            if isinstance(item, dict) and item.get("text")
+                        ]
+
+                        total_meta = len(meta_entries)
+                        if has_page_field:
+                            cursor = 0
+                        else:
+                            cursor = self._get_page_cursor(document_id, page_number)
+
+                        for s in final_sentences:
+                            s_text = s.get("text", "")
+                            k = _norm_s(s_text)
+                            if not k:
+                                continue
+                            s_prefix = _norm_s(" ".join(s_text.split()[:6]))
+
+                            matched_entry = None
+                            matched_idx = -1
+
+                            # 1. Monotonic forward look-ahead from cursor for exact match
+                            for idx in range(cursor, total_meta):
+                                if meta_entries[idx]["norm"] == k:
+                                    matched_entry = meta_entries[idx]
+                                    matched_idx = idx
+                                    break
+
+                            # 2. Monotonic forward look-ahead for prefix/subphrase match
+                            if not matched_entry and s_prefix:
+                                for idx in range(cursor, total_meta):
+                                    m_norm = meta_entries[idx]["norm"]
+                                    m_words = meta_entries[idx]["words"]
+                                    if m_norm.startswith(s_prefix) or (m_words and s_prefix.startswith(m_words)):
+                                        matched_entry = meta_entries[idx]
+                                        matched_idx = idx
+                                        break
+
+                            # 3. Fallback across all entries if sentence occurred earlier or out of order
+                            if not matched_entry:
+                                for idx in range(0, total_meta):
+                                    if meta_entries[idx]["norm"] == k:
+                                        matched_entry = meta_entries[idx]
+                                        matched_idx = idx
+                                        break
+
+                            # 4. Global fallback across entire document's raw_meta for boundary-shifted sentences
+                            if not matched_entry and has_page_field and isinstance(raw_meta, list):
+                                for item in raw_meta:
+                                    if isinstance(item, dict) and item.get("text"):
+                                        if _norm_s(item["text"]) == k:
+                                            matched_entry = {
+                                                "start_time": float(item.get("start_time", 0.0)),
+                                                "end_time": float(item.get("end_time", 0.0)),
+                                            }
+                                            break
+
+                            if matched_entry:
+                                s["start_time"] = matched_entry["start_time"]
+                                s["end_time"] = matched_entry["end_time"]
+                                s["has_media"] = True
+                                if matched_idx >= cursor:
+                                    cursor = matched_idx + 1
+
+
+                        if not has_page_field:
+                            self._record_page_cursor(document_id, page_number + 1, cursor)
+                except Exception:
+                    pass
 
             return final_sentences
 

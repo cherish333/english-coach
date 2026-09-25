@@ -490,6 +490,16 @@ class GamificationManager:
         finally:
             conn.close()
 
+        status_info = {
+            "level": new_level,
+            "title": new_level_info["title"],
+            "streak_days": streak,
+            "progress_percent": new_level_info["progress_percent"],
+            "words_typed": typed_words,
+            "max_combo": curr_max_combo,
+            "sentences_mastered": mastered,
+        }
+
         return {
             "xp_gained": xp_gained,
             "quest_bonus_xp": quest_bonus_xp,
@@ -500,7 +510,8 @@ class GamificationManager:
             "progress_percent": new_level_info["progress_percent"],
             "streak_days": streak,
             "completed_quests": completed_quests,
-            "words_typed": typed_words
+            "words_typed": typed_words,
+            "status": status_info
         }
 
     @staticmethod
