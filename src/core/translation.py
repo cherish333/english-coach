@@ -4,7 +4,7 @@ import re
 import json
 import logging
 import asyncio
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
 import httpx
 from openai import AsyncOpenAI
 from src.core.model_runtime import RoutedClient
@@ -18,8 +18,17 @@ from src.config import (
     NVIDIA_API_KEY,
     NVIDIA_BASE_URL,
     NVIDIA_MODEL,
+    NVIDIA_TRANSLATE_MODEL,
+    NVIDIA_USE_TRANSLATE_MODEL,
 )
 from src.core.notes_manager import DB_PATH, get_db_connection
+from src.core.json_utils import extract_json
+from src.core.api_resilience import (
+    AsyncRetrier,
+    classify_exception,
+    classify_response,
+    registry,
+)
 
 logger = logging.getLogger("english_coach.translation")
 
@@ -40,6 +49,48 @@ def is_valid_chinese_translation(source_text: str, translation: Optional[str]) -
     if has_english_words and not has_chinese_chars:
         return False
     return True
+
+
+# Function words are not worth a gloss slot: they inflate the request, and the
+# user gets no value from seeing "the -> 这". Filtered in the normalizer so it
+# also cleans glosses already sitting in the cache from before this change.
+_GLOSS_STOPWORDS = frozenset("""
+a an the and or but if of to in on at by for with from into over under about
+is am are was were be been being do does did done have has had having will would
+shall should can could may might must this that these those it its he she they
+them his her their our your my me you we us i as not no nor so than then there
+here when where which who whom what why how all any both each few more most
+other some such only own same too very just also
+""".split())
+
+
+# Characters that appear in Traditional Chinese but not Simplified. Used to reject
+# the occasional Traditional rendering from the translation model so the learner
+# always gets Simplified.
+TRADITIONAL_ONLY_CHARS = frozenset("圖書無價學語習識與傳統國時間說話點線網路電腦門開關閉")
+
+
+def _normalize_gloss_dict(parsed: Any) -> Dict[str, str]:
+    """Normalize a raw model gloss mapping into ``{word: short chinese gloss}``.
+
+    Keys are reduced to a bare lowercase lookup token and values are trimmed to a
+    short sense, so the frontend's word-to-gloss matching keeps working no matter
+    how verbose the model was. Shared by the NVIDIA and local gloss paths, which
+    previously carried two slightly different copies of this logic.
+    """
+    if not isinstance(parsed, dict):
+        return {}
+    cleaned: Dict[str, str] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        k_norm = re.sub(r"^[^a-zA-Z0-9']+|[^a-zA-Z0-9']+$", "", key.strip().lower().replace("\u2019", "'"))
+        v_first = re.split(r"[/,、;；]", value.strip())[0].strip()
+        v_short = v_first[:4].strip()
+        v_clean = re.sub(r"[.。,，、/／\\~～…\-_~～\s]+$", "", v_short).strip()
+        if k_norm and v_clean and k_norm not in _GLOSS_STOPWORDS:
+            cleaned[k_norm] = v_clean
+    return cleaned
 
 
 def clean_translation_output(raw: str) -> str:
@@ -108,20 +159,53 @@ WORD_GLOSSES_SYSTEM_PROMPT = (
 
 
 
+class DeepLHTTPError(Exception):
+    """Raised for a non-200 DeepL response so the retrier can classify it."""
+
+    def __init__(self, status_code: int, body: str = "", retry_after: Optional[float] = None):
+        super().__init__(f"DeepL HTTP {status_code}: {body[:120]}")
+        self.status_code = status_code
+        self.body = body
+        self.retry_after = retry_after
+
+
 class TranslationService:
     """Service to translate sentences to Chinese with two-tier caching (memory + SQLite)."""
 
     def __init__(self):
         self._memory_cache: Dict[str, str] = {}
+        self._memory_cache_limit = 5000
         self._glosses_memory_cache: Dict[str, Dict[str, str]] = {}
         self._client: Optional[RoutedClient] = None
         self._nvidia_client: Optional[AsyncOpenAI] = None
         self._http_client: Optional[httpx.AsyncClient] = None
+
+        # Per-provider retry / circuit-breaker / concurrency state. Measured
+        # latency for both providers is sub-second, so the retry budget is cheap
+        # insurance against the transient stalls that used to drop a sentence's
+        # translation permanently.
+        self._deepl = registry.register(
+            "deepl", failure_threshold=4, cooldown=45.0, concurrency=6
+        )
+        self._nvidia = registry.register(
+            "nvidia", failure_threshold=3, cooldown=60.0, concurrency=4
+        )
+        # The 4B translation model is a different service with very different
+        # latency (sub-2s vs 8-38s), so it gets its own health counters.
+        self._riva = registry.register(
+            "nvidia_translate", failure_threshold=3, cooldown=45.0, concurrency=6
+        )
+        self._retrier = AsyncRetrier(max_attempts=3, base_delay=0.4, max_delay=6.0)
         self._init_db()
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(timeout=10.0)
+            # Connect fast, allow a slower first byte: a stalled TLS handshake
+            # should not consume the whole read budget.
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0),
+                limits=httpx.Limits(max_connections=12, max_keepalive_connections=6),
+            )
         return self._http_client
 
     def _get_nvidia_client(self) -> Optional[AsyncOpenAI]:
@@ -131,7 +215,10 @@ class TranslationService:
             self._nvidia_client = AsyncOpenAI(
                 base_url=NVIDIA_BASE_URL,
                 api_key=NVIDIA_API_KEY,
-                timeout=15.0
+                # Our AsyncRetrier owns retrying, so the SDK must not retry too
+                # (otherwise attempts multiply and backoff is lost).
+                max_retries=0,
+                timeout=httpx.Timeout(connect=5.0, read=45.0, write=15.0, pool=5.0),
             )
         return self._nvidia_client
 
@@ -163,46 +250,171 @@ class TranslationService:
             "target_lang": "ZH",
             "source_lang": "EN"
         }
-        try:
+        metrics, breaker, limiter = self._deepl
+
+        async def _call():
             client = self._get_http_client()
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code == 200:
-                data = resp.json()
-                raw_translations = data.get("translations", [])
-                translations = [clean_translation_output(item.get("text", "")) for item in raw_translations]
-                if len(translations) == len(texts):
-                    return translations
-            else:
-                logger.warning(f"DeepL API HTTP {resp.status_code}: {resp.text[:120]}")
-        except Exception as exc:
-            logger.warning(f"DeepL API request failed: {exc}")
+            async with limiter():
+                resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                # Raise so the retrier can classify the status and honour
+                # Retry-After for 429s instead of silently giving up.
+                failure = classify_response(resp.status_code, resp.headers)
+                if not failure.retryable:
+                    logger.warning(
+                        "DeepL rejected the request (HTTP %s, %s): %s",
+                        resp.status_code, failure.reason, resp.text[:160],
+                    )
+                raise DeepLHTTPError(resp.status_code, resp.text[:200], failure.retry_after)
+            return resp.json()
+
+        def _validate(data):
+            items = data.get("translations", []) if isinstance(data, dict) else []
+            if len(items) != len(texts):
+                return f"expected {len(texts)} translations, got {len(items)}"
+            return None
+
+        data, failure = await self._retrier.run(
+            _call,
+            provider="DeepL",
+            metrics=metrics,
+            breaker=breaker,
+            validate=_validate,
+        )
+        if data is None:
+            logger.warning("DeepL translation unavailable (%s)", failure.reason if failure else "unknown")
+            return None
+        translations = [clean_translation_output(item.get("text", "")) for item in data.get("translations", [])]
+        if len(translations) == len(texts):
+            return translations
         return None
 
+    async def _translate_sentences_with_riva(
+        self, texts: List[str]
+    ) -> Optional[List[str]]:
+        """Translate sentences with the dedicated 4B translation model.
+
+        Measured 0.6-1.9s per sentence versus 8-17s for the general instruct
+        model, so this is the preferred NVIDIA path. It is a pure translation
+        model: it needs a plain "translate to X" prompt and cannot produce
+        structured JSON, which is why glosses and whiteboards still use the
+        general model.
+
+        DeepL remains first choice for sentences because its phrasing measured
+        more natural ("关键不在于钉子，而在于孔" vs "这不是关于钉子,而是关于孔"),
+        but this is far faster than the general model when DeepL is unavailable
+        (quota exhausted, outage, or offline).
+        """
+        client = self._get_nvidia_client()
+        if not client or not texts or not NVIDIA_USE_TRANSLATE_MODEL:
+            return None
+        metrics, breaker, limiter = self._riva
+
+        async def _call():
+            async with limiter():
+                # CRITICAL: this model ignores the system message. With the target
+                # language only in the system role it either echoes the English back
+                # or auto-detects a random target language — observed outputs
+                # included unchanged English, Norwegian ("Den antikke biblioteket
+                # inneholder...") and Czech. The "Translate to Simplified Chinese:"
+                # prefix must live in the USER message.
+                prefix = "Translate to Simplified Chinese: "
+                payload = texts[0] if len(texts) == 1 else "\n".join(texts)
+                return await client.chat.completions.create(
+                    model=NVIDIA_TRANSLATE_MODEL,
+                    messages=[{"role": "user", "content": f"{prefix}{payload}"}],
+                    temperature=0.1,
+                    max_tokens=max(120, 160 * len(texts)),
+                )
+
+        def _validate(resp) -> Optional[str]:
+            raw = (resp.choices[0].message.content or "").strip()
+            if not raw:
+                return "empty_output"
+            # A pure translation model must answer in Chinese; anything else means
+            # it echoed the source or auto-detected the wrong language.
+            if not re.search(r"[\u4e00-\u9fff]", raw):
+                return "no_chinese_in_output"
+            # It sometimes produces Traditional Chinese ("古老的圖書館藏有無價的手稿").
+            # Retry so the learner gets Simplified consistently.
+            if TRADITIONAL_ONLY_CHARS & set(raw):
+                return "traditional_chinese"
+            return None
+
+        resp, failure = await self._retrier.run(
+            _call, provider="NVIDIA-Translate", metrics=metrics, breaker=breaker, validate=_validate
+        )
+        if resp is None:
+            logger.info(
+                "NVIDIA translation model unavailable (%s)",
+                failure.reason if failure else "unknown",
+            )
+            return None
+
+        raw = clean_translation_output((resp.choices[0].message.content or "").strip())
+        if len(texts) == 1:
+            return [raw] if is_valid_chinese_translation(texts[0], raw) else None
+        # Multi-line output: keep it only when the line count matches.
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        if len(lines) != len(texts):
+            return None
+        cleaned = [clean_translation_output(ln) for ln in lines]
+        return cleaned if all(
+            is_valid_chinese_translation(src, out) for src, out in zip(texts, cleaned)
+        ) else None
+
     async def _translate_with_nvidia(self, texts: List[str]) -> Optional[List[str]]:
+        # Preferred NVIDIA path: the dedicated 4B translation model (0.6-1.9s vs
+        # 8-17s). Only fall through to the general instruct model if it fails, so
+        # the slow path is used for quality/robustness rather than by default.
+        riva_result = await self._translate_sentences_with_riva(texts)
+        if riva_result is not None:
+            return riva_result
+
         client = self._get_nvidia_client()
         if not client or not texts:
             return None
+        metrics, breaker, limiter = self._nvidia
+
         if len(texts) == 1:
-            try:
-                resp = await client.chat.completions.create(
-                    model=NVIDIA_MODEL,
-                    messages=[
-                        {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
-                        {"role": "user", "content": f"Translate to Chinese: {texts[0]}"}
-                    ],
-                    temperature=0.1,
-                    max_tokens=250,
+            async def _call_single():
+                async with limiter():
+                    return await client.chat.completions.create(
+                        model=NVIDIA_MODEL,
+                        messages=[
+                            {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                            {"role": "user", "content": f"Translate to Chinese: {texts[0]}"}
+                        ],
+                        temperature=0.1,
+                        max_tokens=250,
+                    )
+
+            def _validate_single(resp):
+                cleaned = clean_translation_output((resp.choices[0].message.content or "").strip())
+                if not is_valid_chinese_translation(texts[0], cleaned):
+                    return "invalid_chinese_translation"
+                return None
+
+            resp, failure = await self._retrier.run(
+                _call_single, provider="NVIDIA", metrics=metrics, breaker=breaker,
+                validate=_validate_single,
+            )
+            if resp is None:
+                logger.warning(
+                    "NVIDIA translation failed (%s)", failure.reason if failure else "unknown"
                 )
-                raw = (resp.choices[0].message.content or "").strip()
-                cleaned = clean_translation_output(raw)
-                if is_valid_chinese_translation(texts[0], cleaned):
-                    return [cleaned]
-            except Exception as exc:
-                logger.warning(f"NVIDIA NIM single translation failed: {exc}")
-            return None
-        else:
-            try:
-                prompt = f"Translate these English sentences to Simplified Chinese JSON array:\n{json.dumps(texts, ensure_ascii=False)}"
+                return None
+            cleaned = clean_translation_output((resp.choices[0].message.content or "").strip())
+            return [cleaned] if is_valid_chinese_translation(texts[0], cleaned) else None
+
+        prompt = (
+            "Translate these English sentences to Simplified Chinese JSON array:\n"
+            f"{json.dumps(texts, ensure_ascii=False)}"
+        )
+        parsed_holder: Dict[str, Any] = {}
+
+        async def _call_batch():
+            async with limiter():
                 resp = await client.chat.completions.create(
                     model=NVIDIA_MODEL,
                     messages=[
@@ -210,35 +422,80 @@ class TranslationService:
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.1,
-                    max_tokens=1000,
+                    max_tokens=1400,
                 )
-                raw = (resp.choices[0].message.content or "").strip()
-                raw = clean_translation_output(raw)
-                match = re.search(r"\[[\s\S]*\]", raw)
-                raw_json = match.group(0) if match else raw
-                parsed = json.loads(raw_json)
-                if isinstance(parsed, list) and len(parsed) == len(texts):
-                    cleaned_items = [clean_translation_output(str(t) if t else "") for t in parsed]
-                    return cleaned_items
-            except Exception as exc:
-                logger.warning(f"NVIDIA NIM batch translation failed: {exc}")
+            raw = clean_translation_output((resp.choices[0].message.content or "").strip())
+            # Balanced-brace extraction: a greedy regex swallowed any bracketed
+            # text after the payload and forced a slow per-item fallback even
+            # when the model had answered correctly.
+            parsed, _ = extract_json(raw)
+            if parsed is None:
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    parsed = None
+            parsed_holder["value"] = parsed
+            return parsed
+
+        def _validate_batch(parsed):
+            if not isinstance(parsed, list):
+                return "not_a_json_array"
+            if len(parsed) != len(texts):
+                return f"expected {len(texts)} items, got {len(parsed)}"
             return None
+
+        result, failure = await self._retrier.run(
+            _call_batch, provider="NVIDIA", metrics=metrics, breaker=breaker,
+            validate=_validate_batch,
+        )
+        if result is None:
+            logger.warning(
+                "NVIDIA batch translation failed (%s)", failure.reason if failure else "unknown"
+            )
+            return None
+        return [clean_translation_output(str(t) if t else "") for t in result]
 
     async def _get_glosses_with_nvidia(self, sentence: str) -> Optional[Dict[str, str]]:
         client = self._get_nvidia_client()
         if not client or not sentence:
             return None
+        metrics, breaker, limiter = self._nvidia
+
+        async def _call():
+            async with limiter():
+                return await client.chat.completions.create(
+                    model=NVIDIA_MODEL,
+                    messages=[
+                        {"role": "system", "content": WORD_GLOSSES_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"Sentence: {sentence}"}
+                    ],
+                    temperature=0.1,
+                    max_tokens=800,
+                )
+
+        def _validate(resp) -> Optional[str]:
+            # A response without a usable JSON object is retried: the model
+            # occasionally emits prose instead, and glosses are the whole point
+            # of this call.
+            text = resp.choices[0].message.content or ""
+            parsed, _ = extract_json(text)
+            if isinstance(parsed, dict) and _normalize_gloss_dict(parsed):
+                return None
+            return "no_usable_gloss_json"
+
         try:
-            resp = await client.chat.completions.create(
-                model=NVIDIA_MODEL,
-                messages=[
-                    {"role": "system", "content": WORD_GLOSSES_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Sentence: {sentence}"}
-                ],
-                temperature=0.1,
-                max_tokens=800,
+            resp, failure = await self._retrier.run(
+                _call, provider="NVIDIA", metrics=metrics, breaker=breaker, validate=_validate
             )
+            if resp is None:
+                logger.warning(
+                    "NVIDIA word glosses failed (%s)", failure.reason if failure else "unknown"
+                )
+                return None
             content = resp.choices[0].message.content or ""
+            parsed, raw = extract_json(content)
+            if parsed is not None:
+                return _normalize_gloss_dict(parsed)
             content = re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
             match = re.search(r"\{[\s\S]*\}", content)
             raw = match.group(0) if match else content.strip()
@@ -259,17 +516,9 @@ class TranslationService:
                     pass
 
             if isinstance(parsed, dict) and parsed:
-                cleaned_dict = {}
-                for k, v in parsed.items():
-                    if isinstance(k, str) and isinstance(v, str):
-                        k_norm = re.sub(r"^[^a-zA-Z0-9']+|[^a-zA-Z0-9']+$", "", k.strip().lower().replace("’", "'"))
-                        v_first = re.split(r"[/,、;；]", v.strip())[0].strip()
-                        v_short = v_first[:4].strip()
-                        v_clean = re.sub(r"[.。,，、/／\\~～…\-_~～\s]+$", "", v_short).strip()
-                        if k_norm and v_clean:
-                            cleaned_dict[k_norm] = v_clean
-                if cleaned_dict:
-                    return cleaned_dict
+                cleaned = _normalize_gloss_dict(parsed)
+                if cleaned:
+                    return cleaned
         except Exception as exc:
             logger.warning(f"NVIDIA NIM word glosses failed: {exc}")
         return None
@@ -291,9 +540,39 @@ class TranslationService:
             ),
             "deepl_configured": bool(DEEPL_API_KEY),
             "nvidia_configured": bool(NVIDIA_API_KEY),
+            "deepl_api_url": "free" if "api-free" in (DEEPL_API_URL or "") else "pro",
+            "nvidia_model": NVIDIA_MODEL,
             "memory_cached_sentences": len(self._memory_cache),
             "memory_cached_glosses": len(self._glosses_memory_cache),
+            # Live provider health: attempts, success rate, p50 latency, retries
+            # and circuit state. Without this the user could only guess whether a
+            # cloud engine was working.
+            "providers": registry.snapshot(),
+            "retry_policy": {
+                "max_attempts": self._retrier.max_attempts,
+                "base_delay_seconds": self._retrier.base_delay,
+                "max_delay_seconds": self._retrier.max_delay,
+            },
         }
+
+    def _remember(self, source_text: str, translation: str) -> None:
+        """Insert into the memory cache with a hard size bound.
+
+        Both the read and write paths previously inlined their own eviction, and
+        a plain dict gives insertion-order eviction — so a frequently reused
+        translation could be dropped while a one-off stayed resident.
+        """
+        self._memory_cache[source_text] = translation
+        while len(self._memory_cache) > self._memory_cache_limit:
+            oldest = next(iter(self._memory_cache))
+            self._memory_cache.pop(oldest, None)
+
+    def _remember_glosses(self, sentence: str, glosses: Dict[str, str]) -> None:
+        """Bounded insert for the per-sentence gloss cache."""
+        self._glosses_memory_cache[sentence] = glosses
+        while len(self._glosses_memory_cache) > self._memory_cache_limit:
+            oldest = next(iter(self._glosses_memory_cache))
+            self._glosses_memory_cache.pop(oldest, None)
 
     def _get_client(self) -> RoutedClient:
         if self._client is None:
@@ -362,10 +641,7 @@ class TranslationService:
             if row:
                 trans = row["translation"]
                 if is_valid_chinese_translation(cleaned, trans):
-                    self._memory_cache[cleaned] = trans
-                    if len(self._memory_cache) > 5000:
-                        first_key = next(iter(self._memory_cache))
-                        self._memory_cache.pop(first_key, None)
+                    self._remember(cleaned, trans)
                     return trans
                 else:
                     # Invalidate and delete bad row from DB
@@ -384,10 +660,7 @@ class TranslationService:
         if not is_valid_chinese_translation(cleaned, cleaned_trans):
             return
 
-        self._memory_cache[cleaned] = cleaned_trans
-        if len(self._memory_cache) > 5000:
-            first_key = next(iter(self._memory_cache))
-            self._memory_cache.pop(first_key, None)
+        self._remember(cleaned, cleaned_trans)
         conn = self._get_conn()
         try:
             with conn:
@@ -435,7 +708,7 @@ class TranslationService:
                     return cand
             logger.info(f"NVIDIA NIM translation unavailable or failed for '{cleaned[:30]}...', attempting local fallback...")
 
-        # 3. Fallback: Local RoutedClient (Qwen / Bonsai)
+        # 2. Fallback: Local RoutedClient (Qwen / Bonsai)
         client = self._get_client()
         try:
             resp = await client.chat.completions.create(
@@ -565,10 +838,9 @@ class TranslationService:
                 )
                 raw = (resp.choices[0].message.content or "").strip()
                 raw = clean_translation_output(raw)
-                match = re.search(r"\[[\s\S]*\]", raw)
-                raw_json = match.group(0) if match else raw
-
-                parsed = json.loads(raw_json)
+                parsed, _ = extract_json(raw)
+                if parsed is None:
+                    parsed = json.loads(raw)
                 if isinstance(parsed, list) and len(parsed) == len(chunk):
                     for src, trans in zip(chunk, parsed):
                         clean_t = clean_translation_output(str(trans) if trans else "")
@@ -609,10 +881,7 @@ class TranslationService:
             if row:
                 glosses = json.loads(row["glosses_json"])
                 if isinstance(glosses, dict):
-                    self._glosses_memory_cache[cleaned] = glosses
-                    if len(self._glosses_memory_cache) > 5000:
-                        first_key = next(iter(self._glosses_memory_cache))
-                        self._glosses_memory_cache.pop(first_key, None)
+                    self._remember_glosses(cleaned, glosses)
                     return glosses
         except Exception as exc:
             logger.warning(f"Error querying glosses cache: {exc}")
@@ -626,10 +895,7 @@ class TranslationService:
         if not cleaned or not glosses:
             return
 
-        self._glosses_memory_cache[cleaned] = glosses
-        if len(self._glosses_memory_cache) > 5000:
-            first_key = next(iter(self._glosses_memory_cache))
-            self._glosses_memory_cache.pop(first_key, None)
+        self._remember_glosses(cleaned, glosses)
         conn = self._get_conn()
         try:
             with conn:
@@ -658,7 +924,12 @@ class TranslationService:
         if cached is not None:
             return cached
 
-        # 1. Try NVIDIA NIM API if configured
+        # 1. Structured glosses from the general instruct model.
+        #    NOTE: the dedicated translation model (riva-translate) is deliberately
+        #    NOT used here. It is a pure translation model, so asking it for a JSON
+        #    word-to-gloss dictionary made it auto-detect the language and answer in
+        #    Czech / Arabic (observed: "Klíčová slova: učení, angličtina..."). Only a
+        #    general instruct model honours the JSON contract.
         if TRANSLATION_ENGINE in ("auto", "nvidia") and NVIDIA_API_KEY:
             nv_glosses = await self._get_glosses_with_nvidia(cleaned)
             if nv_glosses:
@@ -666,7 +937,7 @@ class TranslationService:
                 return nv_glosses
             logger.info(f"NVIDIA NIM glosses unavailable for '{cleaned[:30]}...', attempting local fallback...")
 
-        # 2. Fallback: Local RoutedClient (Qwen / Bonsai)
+        # 3. Fallback: Local RoutedClient (Qwen / Bonsai)
         client = self._get_client()
         try:
             resp = await client.chat.completions.create(
@@ -680,6 +951,9 @@ class TranslationService:
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}}
             )
             content = resp.choices[0].message.content or ""
+            parsed, raw = extract_json(content)
+            if parsed is not None:
+                return _normalize_gloss_dict(parsed)
             content = re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
             match = re.search(r"\{[\s\S]*\}", content)
             raw = match.group(0) if match else content.strip()

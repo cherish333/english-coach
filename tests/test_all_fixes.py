@@ -160,20 +160,29 @@ def test_word_glosses_endpoint():
     assert res_empty.status_code == 200
     assert res_empty.json()["glosses"] == {}
 
-    # Test contextual word gloss retrieval and caching
+    # Test contextual word gloss retrieval and caching.
+    # The gloss provider is stubbed so this test never performs a real network
+    # call. Previously it depended on whatever residual httpx client a
+    # previously-run test had left bound to a since-closed event loop, which
+    # made the suite order-dependent and flaky.
     sentence = "He runs a business by the river bank."
-    res = client.post("/api/sentence/word-glosses", json={"sentence": sentence})
-    assert res.status_code == 200
-    data = res.json()
-    assert "glosses" in data
-    glosses = data["glosses"]
-    assert isinstance(glosses, dict)
-    assert len(glosses) > 0
-    assert "runs" in glosses
-    # Second request hits SQLite / memory cache
-    res_cached = client.post("/api/sentence/word-glosses", json={"sentence": sentence})
-    assert res_cached.status_code == 200
-    assert res_cached.json()["glosses"] == glosses
+    fake_glosses = {"runs": "经营", "business": "生意", "river": "河流", "bank": "岸"}
+    with mock.patch(
+        "src.core.translation.TranslationService._get_glosses_with_nvidia",
+        new=mock.AsyncMock(return_value=fake_glosses),
+    ):
+        res = client.post("/api/sentence/word-glosses", json={"sentence": sentence})
+        assert res.status_code == 200
+        data = res.json()
+        assert "glosses" in data
+        glosses = data["glosses"]
+        assert isinstance(glosses, dict)
+        assert len(glosses) > 0
+        assert "runs" in glosses
+        # Second request hits SQLite / memory cache
+        res_cached = client.post("/api/sentence/word-glosses", json={"sentence": sentence})
+        assert res_cached.status_code == 200
+        assert res_cached.json()["glosses"] == glosses
 
 
 def test_evaluator_bidirectional_contractions():
@@ -363,11 +372,18 @@ def test_audio_end_race_condition_protection():
     server_py = (PROJECT_ROOT / "src" / "server.py").read_text(encoding="utf-8")
     app_js = (PROJECT_ROOT / "src" / "static" / "app.js").read_text(encoding="utf-8")
 
-    # In server.py: is_turn_busy guards audio_end and process_user_speech from emitting untagged Listening
+    # In server.py: is_turn_busy guards audio_end and speech processing from emitting untagged Listening
     assert "def is_turn_busy() -> bool:" in server_py
     assert "if not is_turn_busy():" in server_py
     assert 'msg_type == "audio_end"' in server_py
-    assert "if not is_turn_busy():\n                        await process_user_speech()" in server_py
+    # audio_end must route through the background dispatcher (so control frames keep
+    # flowing during ASR) rather than awaiting transcription inline.
+    assert "if not is_turn_busy():\n                        # The client releasing the mic" in server_py
+    # Audio flushed while the coach is still speaking must be discarded, not merged
+    # into the next utterance.
+    assert "Discarded audio flushed during a busy turn" in server_py
+    # is_transcribing is owned by the dispatcher, so every exit path must clear it.
+    assert "def dispatch_speech_processing():" in server_py
 
     # In app.js: Listening status does not overwrite active Coach is thinking or speaking when untagged
     assert 'statusPill.textContent.includes("Coach is thinking") || statusPill.classList.contains("speaking")' in app_js

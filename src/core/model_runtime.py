@@ -648,6 +648,13 @@ class ModelRuntime:
         }
 
     async def close(self):
+        """Shut down clients *and* any model process this app started.
+
+        Previously this only closed HTTP clients, so a llama-server spawned with
+        start_new_session=True survived application exit and kept holding VRAM.
+        Nothing else in the project kills llama-server (stop-app.sh only pkills
+        the Python server), so the leak was permanent until reboot.
+        """
         if self.busy and self.task:
             self.task.cancel()
             try:
@@ -660,6 +667,26 @@ class ModelRuntime:
             except Exception:
                 pass
         self.clients.clear()
+
+        # Ask the managed processes to exit, then reap them. Failures are logged
+        # but never block application shutdown.
+        for stop in (self.stop_mini, self.stop_bonsai):
+            try:
+                await stop()
+            except Exception:
+                logger.warning("Failed to stop a managed model process during shutdown", exc_info=True)
+
+        child = getattr(self, "child", None)
+        if child is not None and child.poll() is None:
+            try:
+                child.terminate()
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(child.wait), timeout=5)
+                except asyncio.TimeoutError:
+                    child.kill()
+                    await asyncio.to_thread(child.wait)
+            except Exception:
+                logger.warning("Failed to terminate a managed model process", exc_info=True)
 
 
 runtime = ModelRuntime()

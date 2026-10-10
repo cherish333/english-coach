@@ -177,8 +177,13 @@ class TtsProcessor:
         try:
             wav_bytes = await self.generate_kokoro_wav_async(text, voice="af_maple", speed=speed)
             if wav_bytes and len(text) <= 60 and len(text.split()) <= 10:
-                self._audio_cache[cache_key] = (wav_bytes, "audio/wav")
-                self._audio_cache.move_to_end(cache_key)
+                # Cache under an engine-qualified key. Storing Kokoro bytes under
+                # the Edge key meant a single offline session permanently
+                # downgraded that sentence+voice: the next request was served the
+                # fallback audio from cache and edge_tts was never tried again.
+                fallback_key = (cache_key[0], cache_key[1], cache_key[2], "kokoro")
+                self._audio_cache[fallback_key] = (wav_bytes, "audio/wav")
+                self._audio_cache.move_to_end(fallback_key)
                 while len(self._audio_cache) > 3000:
                     self._audio_cache.popitem(last=False)
             return wav_bytes, "audio/wav"

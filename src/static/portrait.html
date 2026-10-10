@@ -263,6 +263,116 @@
       overflow: hidden;
     }
 
+    /* ------------------------------------------------------------------
+       Adaptive split: when typing is docked to this screen, the reference
+       panel yields space instead of staying pinned at 58vh.
+
+       A portrait learner is looking at the typing surface, so the page image
+       only needs to be a readable reference, not the dominant element. The
+       height is deliberately expressed with !important so it also overrides a
+       previously dragged inline height (the resizer writes pdfPanel.style.height
+       directly); entering typing mode re-claims the space, and the user can
+       still drag afterwards within the new bounds.
+       ------------------------------------------------------------------ */
+    .portrait-body.typing-docked .pdf-top-panel {
+      height: clamp(180px, 30vh, 420px) !important;
+      min-height: 180px;
+    }
+    /* Focus-typing view: the PDF is nearly irrelevant, so shrink it further.
+       (:has keeps this correct without relying on document order.) */
+    .portrait-body.typing-docked:has(.sentences-bottom-panel.view-typing-only) .pdf-top-panel {
+      height: clamp(140px, 22vh, 300px) !important;
+    }
+    /* The typing surface gets everything left over. */
+    .portrait-body.typing-docked .sentences-bottom-panel {
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    .portrait-body.typing-docked #p-shadow-typing-card {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .portrait-body.typing-docked #p-typing-target-display {
+      flex: 1 1 auto;
+      min-height: 220px;
+    }
+    /* On a tall portrait display there is room for larger type, which is the
+       whole reason to type here rather than on the landscape screen. */
+    @media (min-height: 1200px) {
+      .portrait-body.typing-docked #p-typing-target-display {
+        font-size: 30px;
+        line-height: 2.0;
+      }
+      .portrait-body.typing-docked #p-focus-text {
+        font-size: 24px;
+      }
+    }
+
+    /* ------------------------------------------------------------------
+       Bottom-panel view modes.
+
+       `view-split` / `view-typing-only` / `view-sentences-only` /
+       `view-notes-only` were toggled by setPortraitViewMode() but had **no CSS
+       at all**: the four tabs only switched panel visibility, so choosing
+       "专注跟打" did not actually give the typing surface more room. These rules
+       make the modes real by letting the focused panel take all remaining height
+       and hiding the ones it supersedes.
+       ------------------------------------------------------------------ */
+    .sentences-bottom-panel.view-typing-only #p-sentences-container,
+    .sentences-bottom-panel.view-notes-only #p-sentences-container {
+      display: none !important;
+    }
+    .sentences-bottom-panel.view-sentences-only #p-shadow-typing-card,
+    .sentences-bottom-panel.view-notes-only #p-shadow-typing-card {
+      display: none !important;
+    }
+
+    /* Focus modes: the current-focus card collapses to a single readable line so
+       the chosen panel gets the height.
+       `flex: 0 0 auto` alone was not enough — the card is a content-sized flex
+       item with no explicit flex, and the panel is width-constrained. The
+       important flex-basis is what actually releases the ~143px it occupied. */
+    .sentences-bottom-panel.view-typing-only .current-focus-card,
+    .sentences-bottom-panel.view-notes-only .current-focus-card,
+    .sentences-bottom-panel.view-sentences-only .current-focus-card {
+      flex: 0 1 auto !important;
+      padding: 8px 12px !important;
+      margin: 6px 12px 4px 12px !important;
+      gap: 4px !important;
+    }
+    .sentences-bottom-panel.view-typing-only .current-focus-card .focus-sentence-text,
+    .sentences-bottom-panel.view-notes-only .current-focus-card .focus-sentence-text {
+      font-size: 15px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sentences-bottom-panel.view-typing-only .current-focus-card .focus-translation-row,
+    .sentences-bottom-panel.view-notes-only .current-focus-card .focus-translation-row {
+      display: none;
+    }
+
+    /* The focused panel fills the space left after the tabs + toolbar. */
+    .sentences-bottom-panel.view-typing-only #p-shadow-typing-card,
+    .sentences-bottom-panel.view-notes-only #p-notes-container {
+      flex: 1 1 auto !important;
+      min-height: 0 !important;
+      max-height: none !important;
+      overflow: hidden;
+    }
+    .sentences-bottom-panel.view-typing-only #p-typing-target-display {
+      flex: 1 1 auto !important;
+      min-height: 200px;
+      max-height: none !important;
+    }
+    .sentences-bottom-panel.view-sentences-only #p-sentences-container {
+      flex: 1 1 auto !important;
+      min-height: 0 !important;
+      overflow-y: auto;
+    }
+
     /* 顶部视听展台与 16:9 原声视频剧场样式 */
     .p-stage-content {
       width: 100%;
@@ -1114,7 +1224,7 @@
               <button id="p-focus-trans-toggle" class="btn btn-quiet" style="padding: 2px 8px; font-size: 11px; height: 24px;" title="显示/隐藏中文释义">🇨🇳 译文</button>
             </div>
           </div>
-          <div class="focus-sentence-text" id="p-focus-text">正在提取教材句子...</div>
+          <div class="focus-sentence-text" id="p-focus-text" lang="en">正在提取教材句子...</div>
           <!-- 中文释义呈现区 -->
           <div class="focus-translation-box" id="p-focus-trans-box">
             <span class="translation-prefix">🇨🇳 释义</span>
@@ -1142,7 +1252,7 @@
             </div>
           </div>
 
-          <div class="typing-target-display" id="p-typing-target-display" tabindex="0" title="竖屏跟打练习区 (点击直接开始敲击键盘跟打)">
+          <div class="typing-target-display" id="p-typing-target-display" lang="en" tabindex="0" title="竖屏跟打练习区 (点击直接开始敲击键盘跟打)">
             <span class="char-pending">载入教材后开始跟打练习</span>
           </div>
 
@@ -3314,6 +3424,11 @@
       if (card) {
         card.style.display = isPortrait ? "flex" : "none";
       }
+      // When the typing surface lives here, the reference panel must yield
+      // vertical space: the PDF/video stage is the least useful thing on this
+      // screen while the learner is typing, yet it was pinned at 58vh, leaving
+      // the typing card ~500px of a 1920px-tall display.
+      document.querySelector(".portrait-body")?.classList.toggle("typing-docked", isPortrait);
       if (navDockBtn) {
         navDockBtn.textContent = isPortrait ? "⌨️ 竖屏跟打中 (移回)" : "⌨️ 竖屏跟打";
         navDockBtn.classList.toggle("active", isPortrait);
@@ -3708,6 +3823,8 @@
       setPortraitTypingDock(pTypingDock, false);
       setPortraitNotesDock(pNotesDock, false);
       setPortraitViewMode(pViewMode);
+      // Reflect the restored dock on the layout class as well.
+      document.querySelector(".portrait-body")?.classList.toggle("typing-docked", pTypingDock === "portrait");
     }
 
     // Start

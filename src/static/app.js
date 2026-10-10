@@ -615,7 +615,7 @@ function playNoteWordAudio(word, btnEl = null) {
       .then(r => r.ok ? r.blob() : null)
       .then(blob => {
         if (blob) {
-          wordAudioCache.set(cacheKey, URL.createObjectURL(blob));
+          cacheWordAudio(cacheKey, URL.createObjectURL(blob));
         }
       })
       .catch(() => {});
@@ -708,7 +708,7 @@ function enhanceWhiteboardVocab(container) {
         .then(r => r.ok ? r.blob() : null)
         .then(blob => {
           if (blob) {
-            wordAudioCache.set(cacheKey, URL.createObjectURL(blob));
+            cacheWordAudio(cacheKey, URL.createObjectURL(blob));
           }
         })
         .catch(() => {});
@@ -883,12 +883,17 @@ const SoundEngine = {
   toggle() {
     this.enabled = !this.enabled;
     localStorage.setItem("ai_coach_sound_effects", this.enabled ? "true" : "false");
-    const btn = document.getElementById("typing-sound-btn");
-    if (btn) {
-      btn.textContent = this.enabled ? "🔊" : "🔇";
-      btn.title = this.enabled ? "敲击音效开关 (开启中)" : "敲击音效开关 (已静音)";
-    }
+    this.syncButton();
     showToast(this.enabled ? "🔊 键盘敲击音效已开启" : "🔇 敲击音效已静音");
+  },
+  syncButton() {
+    // The glyph used to be written only from toggle(), so after reloading with
+    // sound disabled the button still advertised 🔊 while clicks were silent.
+    const btn = document.getElementById("typing-sound-btn");
+    if (!btn) return;
+    btn.textContent = this.enabled ? "🔊" : "🔇";
+    btn.title = this.enabled ? "敲击音效开关 (开启中)" : "敲击音效开关 (已静音)";
+    btn.classList.toggle("active", this.enabled);
   },
   playKeyClick() {
     if (!this.enabled) return;
@@ -1090,6 +1095,265 @@ let currentTypingCombo = 0;
 let maxTypingComboInSentence = 0;
 let typingStartTime = null;
 let lastTypedLength = 0;
+
+// ---------------------------------------------------------------------------
+// Practice mode: copy -> cloze -> recall -> dictation
+//
+// Copy-typing with the answer visible is *recognition + transcription*: it never
+// requires retrieval, which is the single most robust finding in the learning
+// literature. These modes fade the scaffolding instead of removing it.
+//   copy      - full text visible (the beginner default, unchanged)
+//   cloze     - content words replaced by a blank of the same length
+//   recall    - characters hidden until typed correctly (first letter shown)
+//   dictation - nothing shown; the sentence is played from audio
+// ---------------------------------------------------------------------------
+const TYPING_MODE_STORAGE_KEY = "ai_coach_practice_mode";
+const PRACTICE_MODES = ["copy", "cloze", "recall", "dictation"];
+const PRACTICE_MODE_LABELS = {
+  copy: "📖 对照跟打",
+  cloze: "🧩 填空回忆",
+  recall: "🧠 无提示默写",
+  dictation: "🎧 听写",
+};
+let currentPracticeMode = (() => {
+  const stored = localStorage.getItem(TYPING_MODE_STORAGE_KEY);
+  return PRACTICE_MODES.includes(stored) ? stored : "copy";
+})();
+let clozeHiddenIndices = new Set();
+// In recall/dictation the learner may reveal the answer; we track that so the
+// graded result is honest about how much help was used.
+let typingRevealCount = 0;
+let typingMistakeCount = 0;
+
+function setPracticeMode(mode, { rerender = true } = {}) {
+  if (!PRACTICE_MODES.includes(mode)) mode = "copy";
+  currentPracticeMode = mode;
+  try { localStorage.setItem(TYPING_MODE_STORAGE_KEY, mode); } catch (_) {}
+  const label = document.getElementById("typing-mode-label");
+  if (label) label.textContent = PRACTICE_MODE_LABELS[mode] || PRACTICE_MODE_LABELS.copy;
+  document.querySelectorAll("[data-practice-mode]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.practiceMode === mode);
+  });
+  // Dictation must not show the translation or the PDF highlight: both give the
+  // answer away.
+  const transDisplay = document.getElementById("typing-translation-display");
+  if (transDisplay) transDisplay.style.display = mode === "copy" ? "" : "none";
+  const revealBtn = document.getElementById("typing-reveal-btn");
+  if (revealBtn) revealBtn.style.display = mode === "copy" ? "none" : "";
+  if (rerender && currentTypingTarget) {
+    renderTypingTarget();
+  }
+}
+
+function cyclePracticeMode() {
+  const idx = PRACTICE_MODES.indexOf(currentPracticeMode);
+  setPracticeMode(PRACTICE_MODES[(idx + 1) % PRACTICE_MODES.length]);
+  showToast(`练习模式：${PRACTICE_MODE_LABELS[currentPracticeMode]}`);
+}
+
+function computeClozeHiddenIndices(text) {
+  // Deterministic and content-weighted: hide the longest words, matching the
+  // server-side cloze helper so both agree.
+  const indices = new Set();
+  const wordRe = /[A-Za-z][A-Za-z'-]*/g;
+  const words = [];
+  let match;
+  while ((match = wordRe.exec(text)) !== null) {
+    if (match[0].length >= 4) words.push({ start: match.index, end: match.index + match[0].length });
+  }
+  if (!words.length) return indices;
+  const hideCount = Math.max(1, Math.round(words.length * 0.4));
+  words
+    .sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start)
+    .slice(0, hideCount)
+    .forEach((w) => {
+      for (let i = w.start; i < w.end; i++) indices.add(i);
+    });
+  return indices;
+}
+
+function renderTypingTarget() {
+  const display = document.getElementById("typing-target-display");
+  if (!display) return;
+  // typedBuffer (not the DOM) is the source of truth for what was typed, so
+  // masking characters for cloze/recall cannot corrupt the comparison.
+  const typed = typedBuffer;
+  const typedLen = Math.min(typed.length, currentTypingTarget.length);
+  // recall scaffolds the first letter of each word (the learner has seen the
+  // sentence); dictation hides everything, because the point is to decode audio.
+  const isRecall = currentPracticeMode === "recall";
+  const isDictation = currentPracticeMode === "dictation";
+  const isHidden = isRecall || isDictation;
+
+  if (currentPracticeMode === "cloze") {
+    clozeHiddenIndices = computeClozeHiddenIndices(currentTypingTarget);
+  } else {
+    clozeHiddenIndices = new Set();
+  }
+
+  display.innerHTML = currentTypingTarget
+    .split("")
+    .map((ch, idx) => {
+      let cls = "char-pending";
+      let shown = escapeHtml(ch);
+      if (idx < typedLen) {
+        cls = areTypingCharsEqual(typed[idx], ch) ? "char-correct" : "char-wrong";
+        if (areTypingCharsEqual(typed[idx], ch)) shown = escapeHtml(ch);
+      } else if (idx === typedLen) {
+        cls = "char-current";
+      }
+      if (idx >= typedLen) {
+        if (isHidden) {
+          // recall keeps whitespace plus each word's first letter as a scaffold;
+          // dictation reveals only whitespace and word boundaries.
+          const isWordStart = idx === 0 || /[\s\u2014\-]/.test(currentTypingTarget[idx - 1]);
+          if (ch === " ") shown = "&nbsp;";
+          else if (isRecall && isWordStart) shown = escapeHtml(ch);
+          else shown = `<span class="char-hidden">•</span>`;
+          const startsHiddenChar = /[A-Za-z]/.test(ch) && !(isRecall && isWordStart);
+          if (idx === typedLen && startsHiddenChar) cls = "char-current-masked";
+        } else if (clozeHiddenIndices.has(idx)) {
+          shown = `<span class="char-hidden">_</span>`;
+        }
+      }
+      return `<span class="${cls}" data-idx="${idx}">${shown}</span>`;
+    })
+    .join("");
+  requestScrollTypingTarget();
+}
+
+function revealTypingAnswer() {
+  if (currentPracticeMode === "copy") return;
+  typingRevealCount += 1;
+  const display = document.getElementById("typing-target-display");
+  if (!display) return;
+  display.innerHTML = currentTypingTarget
+    .split("")
+    .map((ch, idx) => `<span class="char-pending" data-idx="${idx}">${ch === " " ? "&nbsp;" : escapeHtml(ch)}</span>`)
+    .join("");
+  showToast("已显示原文（本次成绩会标注使用了提示）");
+}
+
+// Ask the backend to warm whiteboard notes for the sentences just ahead of the
+// cursor. Fire-and-forget: failures are irrelevant because the user will request
+// the notes on demand anyway.
+let notesPrefetchAt = 0;
+function prefetchUpcomingNotes() {
+  if (typeof lectureSentences === "undefined" || !Array.isArray(lectureSentences)) return;
+  try {
+    if (localStorage.getItem("ai_coach_notes_prefetch") === "false") return;
+  } catch (_) {}
+  // Throttle: sentence navigation can fire rapidly with the arrow keys.
+  const now = Date.now();
+  if (now - notesPrefetchAt < 4000) return;
+  notesPrefetchAt = now;
+
+  const upcoming = [];
+  for (let i = currentSentenceIndex; i < lectureSentences.length && upcoming.length < 3; i++) {
+    const s = lectureSentences[i];
+    if (s && typeof s.text === "string" && s.text.trim()) upcoming.push(s.text.trim());
+  }
+  if (!upcoming.length) return;
+  fetch("/api/sentence/notes-prefetch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sentences: upcoming, ahead: 2 }),
+  }).catch(() => {});
+}
+
+// Practice a graded retrieval attempt and, when it maps to a review item, send
+// the grade to the spaced-repetition scheduler. This is the loop that turns
+// practice into durable memory instead of keystrokes.
+const reviewItemsByPrompt = new Map();
+
+function updateReviewStats(stats) {
+  if (!stats) return;
+  const set = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+  set("review-due-count", stats.due_now ?? "–");
+  set("review-known-count", stats.known_estimate ?? "–");
+  set("review-total-count", stats.total ?? "–");
+  set("review-accuracy", stats.accuracy_30d === null || stats.accuracy_30d === undefined
+    ? "–"
+    : `${Math.round(stats.accuracy_30d * 100)}%`);
+  const badge = document.getElementById("modal-review-badge");
+  if (badge) badge.textContent = stats.due_now ?? 0;
+  syncChannel.postMessage({ type: "review_stats_updated", data: { due_now: stats.due_now ?? 0 } });
+}
+
+// Load sentences from the current page into the prompt index so a graded
+// retrieval attempt can be matched to its review item.
+async function loadReviewItemsForCurrentContext() {
+  try {
+    const params = new URLSearchParams({ limit: "200" });
+    if (typeof lectureDocumentId !== "undefined" && lectureDocumentId) {
+      params.set("document_id", lectureDocumentId);
+    }
+    const res = await fetch(`/api/review/queue?${params.toString()}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    (data.items || []).forEach(item => {
+      const key = item.answer || item.prompt;
+      if (key) reviewItemsByPrompt.set(key, item);
+    });
+  } catch (err) {
+    console.warn("Failed to preload review items:", err);
+  }
+}
+
+async function recordRetrievalResult() {
+  if (!currentTypingTarget) return;
+  try {
+    const payload = {
+      target_text: currentTypingTarget,
+      typed_text: typedBuffer,
+      mode: currentPracticeMode === "dictation" ? "dictation" : "recall",
+      apply_to_srs: false,
+    };
+    const res = await fetch("/api/practice/grade-dictation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const result = data && data.result;
+    if (!result) return;
+
+    // Honesty: using "看答案" downgrades the grade, because the item was not
+    // actually retrieved.
+    let grade = result.grade;
+    if (typingRevealCount > 0) grade = Math.min(grade, 2);
+
+    if (!reviewItemsByPrompt.has(currentTypingTarget)) {
+      await loadReviewItemsForCurrentContext();
+    }
+    const item = reviewItemsByPrompt.get(currentTypingTarget);
+    if (!item) return;
+
+    const graded = await fetch("/api/review/grade", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        item_id: item.id,
+        rating: grade,
+        mode: payload.mode,
+      }),
+    });
+    if (!graded.ok) return;
+    const gradedData = await graded.json();
+    const next = gradedData && gradedData.item;
+    if (next) {
+      reviewItemsByPrompt.set(currentTypingTarget, next);
+      if (gradedData.stats) updateReviewStats(gradedData.stats);
+    }
+    showToast(`🎯 回忆评分 ${result.score} 分 · 已加入间隔复习计划`);
+  } catch (err) {
+    console.warn("Failed to record retrieval result:", err);
+  }
+}
 let typedBuffer = "";
 let currentTypingRepeatRounds = parseInt(localStorage.getItem("ai_coach_typing_repeats") || "1", 10);
 if (![1, 2, 3].includes(currentTypingRepeatRounds)) currentTypingRepeatRounds = 1;
@@ -1159,6 +1423,28 @@ function cycleTypingRepeatRounds() {
 let isWordAudioEnabled = localStorage.getItem("ai_coach_word_audio") !== "false";
 let isWordTranslationAudioEnabled = localStorage.getItem("ai_coach_word_trans_audio") !== "false";
 const wordAudioCache = new Map(); // key: "word:voice" or "zh:word:voice" -> blobUrl
+const WORD_AUDIO_CACHE_MAX = 300;
+
+// Every entry holds a live object URL, so the cache must be bounded and evicted
+// URLs revoked. setupShadowTyping prefetches the current *and* next sentence on
+// every sentence change, so a long reading session used to accumulate one
+// un-releasable blob per distinct word and gloss for the life of the tab.
+function cacheWordAudio(cacheKey, blobUrl) {
+  if (wordAudioCache.has(cacheKey)) {
+    const previous = wordAudioCache.get(cacheKey);
+    if (previous && previous !== blobUrl) {
+      try { URL.revokeObjectURL(previous); } catch (_) {}
+    }
+  } else if (wordAudioCache.size >= WORD_AUDIO_CACHE_MAX) {
+    const oldestKey = wordAudioCache.keys().next().value;
+    const oldestUrl = wordAudioCache.get(oldestKey);
+    wordAudioCache.delete(oldestKey);
+    if (oldestUrl) {
+      try { URL.revokeObjectURL(oldestUrl); } catch (_) {}
+    }
+  }
+  wordAudioCache.set(cacheKey, blobUrl);
+}
 let wordAudioEl = null;
 let wordZhAudioEl = null;
 let currentSentenceWords = [];
@@ -1405,7 +1691,7 @@ function prefetchGlossTranslations(zhWords) {
       .then(blob => {
         if (blob) {
           const blobUrl = URL.createObjectURL(blob);
-          wordAudioCache.set(cacheKey, blobUrl);
+          cacheWordAudio(cacheKey, blobUrl);
         }
       })
       .catch(e => console.debug("Prefetch failed for zh gloss:", zh, e));
@@ -1428,7 +1714,7 @@ function prefetchSentenceWords(words) {
       .then(blob => {
         if (blob) {
           const blobUrl = URL.createObjectURL(blob);
-          wordAudioCache.set(cacheKey, blobUrl);
+          cacheWordAudio(cacheKey, blobUrl);
         }
       })
       .catch(e => console.debug("Prefetch failed for word:", w, e));
@@ -1469,7 +1755,7 @@ function playWordTranslationAudio(zhText, sessionId) {
     .then(blob => {
       if (!blob) return;
       const blobUrl = URL.createObjectURL(blob);
-      wordAudioCache.set(cacheKey, blobUrl);
+      cacheWordAudio(cacheKey, blobUrl);
       if (currentWordZhAudioReqTime === reqTime && (sessionId === undefined || sessionId === currentWordAudioSessionId)) {
         wordZhAudioEl.src = blobUrl;
         wordZhAudioEl.play().catch(e => console.debug("Zh word audio play interrupted:", e));
@@ -1535,7 +1821,7 @@ function playWordAudio(wordClean, force = false, wordIndex = -1) {
     })
     .then(blob => {
       const blobUrl = URL.createObjectURL(blob);
-      wordAudioCache.set(cacheKey, blobUrl);
+      cacheWordAudio(cacheKey, blobUrl);
       if (currentWordAudioReqTime === reqTime && sessionId === currentWordAudioSessionId) {
         wordAudioEl.src = blobUrl;
         wordAudioEl.play().catch(e => console.debug("Word audio play interrupted:", e));
@@ -1695,6 +1981,15 @@ function prefetchPageTranslations(sentences) {
 
 let isGeneratingSmartNotes = false;
 let currentSmartNotesSentence = "";
+// Live elapsed indicator for the (measured 10-35s) cloud whiteboard call.
+let notesElapsedTimer = null;
+
+function stopNotesElapsedTimer() {
+  if (notesElapsedTimer) {
+    clearInterval(notesElapsedTimer);
+    notesElapsedTimer = null;
+  }
+}
 
 async function fetchSentenceSmartNotes(sentenceText, translation = "", forceRefresh = false) {
   if (!sentenceText || !sentenceText.trim()) return;
@@ -1716,6 +2011,22 @@ async function fetchSentenceSmartNotes(sentenceText, translation = "", forceRefr
   isGeneratingSmartNotes = true;
   currentSmartNotesSentence = cleaned;
 
+  // NVIDIA NIM measured 10-35s for a full whiteboard (median ~21s), so a static
+  // "生成中…" looks frozen. Show a live elapsed counter and an honest progress
+  // hint so a 20s wait reads as "working" rather than "hung".
+  const notesStartedAt = Date.now();
+  if (notesElapsedTimer) clearInterval(notesElapsedTimer);
+  notesElapsedTimer = setInterval(() => {
+    const secs = Math.floor((Date.now() - notesStartedAt) / 1000);
+    const el = document.getElementById("notes-elapsed");
+    if (el) el.textContent = `${secs} 秒`;
+    const bar = document.getElementById("notes-progress-fill");
+    if (bar) {
+      // Asymptotic: never reaches 100% until the real response lands.
+      bar.style.width = `${Math.min(92, Math.round((1 - Math.exp(-secs / 12)) * 100))}%`;
+    }
+  }, 500);
+
   // Display loading state on whiteboard
   if (whiteboardContent) {
     whiteboardContent.innerHTML = `
@@ -1723,6 +2034,8 @@ async function fetchSentenceSmartNotes(sentenceText, translation = "", forceRefr
         <div class="loading-icon">⚡</div>
         <div style="font-size: 13.5px; font-weight: 600; color: var(--accent, #38bdf8); margin-bottom: 4px;">正在通过云端 AI 提炼句法骨架与生词精讲…</div>
         <div style="font-size: 11.5px; color: var(--muted); max-width: 280px; line-height: 1.5;">深度拆解长难句语法树，精准提炼重点生词短语及原生例句</div>
+        <div class="notes-progress-track"><div class="notes-progress-fill" id="notes-progress-fill"></div></div>
+        <div style="font-size: 11px; color: var(--muted); margin-top: 6px;">已用时 <span id="notes-elapsed">0 秒</span> · 云端大模型推理较慢，请稍候</div>
       </div>
     `;
   }
@@ -1775,6 +2088,8 @@ async function fetchSentenceSmartNotes(sentenceText, translation = "", forceRefr
       }
     }
   } finally {
+    // Always stop the elapsed timer, on success and on failure.
+    stopNotesElapsedTimer();
     isGeneratingSmartNotes = false;
     if (generateNotesBtn) {
       generateNotesBtn.disabled = false;
@@ -1839,11 +2154,26 @@ function setupShadowTyping(targetText, translation = null) {
   // Pre-fetch contextual Chinese word glosses for high-speed typing playback
   if (currentTypingTarget) {
     fetchSentenceWordGlosses(currentTypingTarget);
+    // Index this page's review items so a graded retrieval attempt can be tied
+    // back to its scheduler entry.
+    loadReviewItemsForCurrentContext();
+    // Warm whiteboard notes for the upcoming sentences. NVIDIA NIM is free but
+    // measured 13-38s per board, so pre-generating means the next sentence's
+    // board is already cached when the learner navigates to it.
+    prefetchUpcomingNotes();
     if (Array.isArray(lectureSentences) && currentSentenceIndex < lectureSentences.length) {
       const nextSentObj = lectureSentences[currentSentenceIndex];
       if (nextSentObj && nextSentObj.text) {
         fetchSentenceWordGlosses(nextSentObj.text);
       }
+    }
+    // Dictation is a listening exercise: play the sentence once so the learner
+    // has something to decode. Deferred so the card is on screen first.
+    if (currentPracticeMode === "dictation" && currentSentenceIndex > 0) {
+      setTimeout(() => {
+        if (currentPracticeMode !== "dictation") return;
+        try { replayCurrentSentenceAudio(); } catch (_) {}
+      }, 350);
     }
   }
 
@@ -1858,6 +2188,8 @@ function setupShadowTyping(targetText, translation = null) {
   if (soundBtn && !soundBtn.dataset.bound) {
     soundBtn.dataset.bound = "true";
     soundBtn.addEventListener("click", () => SoundEngine.toggle());
+    // Reflect the persisted preference on load, not only after a click.
+    SoundEngine.syncButton();
   }
 
   if (transToggleBtn && !transToggleBtn.dataset.bound) {
@@ -1904,11 +2236,12 @@ function setupShadowTyping(targetText, translation = null) {
     dockedSentTag.textContent = `当前第 ${currentSentenceIndex || 1} 句`;
   }
 
-  // Render character spans (English target only)
-  display.innerHTML = currentTypingTarget
-    .split("")
-    .map((ch, idx) => `<span class="${idx === 0 ? 'char-current' : 'char-pending'}" data-idx="${idx}">${escapeHtml(ch)}</span>`)
-    .join("");
+  // Render character spans according to the active practice mode.
+  // A new sentence invalidates any previous pronunciation score on screen.
+  hidePronunciationResult();
+  typingRevealCount = 0;
+  typingMistakeCount = 0;
+  renderTypingTarget();
   display.classList.remove("typing-active");
   display.scrollTop = 0;
   typingScrollTargetTop = null;
@@ -1999,27 +2332,22 @@ function handleTypingInput() {
     }
   }
 
-  const spans = display.querySelectorAll("span[data-idx]");
+  // Correctness accounting only; class assignment happens in renderTypingTarget()
+  // so that masked modes stay consistent with the comparison buffer.
   let correctCount = 0;
   let hasError = false;
-
-  for (let i = 0; i < spans.length; i++) {
-    const span = spans[i];
-    const targetChar = currentTypingTarget[i];
-    if (i < typed.length) {
-      if (areTypingCharsEqual(typed[i], targetChar)) {
-        span.className = "char-correct";
-        correctCount++;
-      } else {
-        span.className = "char-wrong";
-        hasError = true;
-      }
-    } else if (i === typed.length) {
-      span.className = "char-current";
-    } else {
-      span.className = "char-pending";
+  for (let i = 0; i < currentTypingTarget.length; i++) {
+    if (i < typed.length && areTypingCharsEqual(typed[i], currentTypingTarget[i])) {
+      correctCount++;
+    } else if (i < typed.length) {
+      hasError = true;
     }
   }
+
+  // Mode-aware render: in cloze/recall/dictation this also decides which
+  // characters stay masked, so it replaces the per-span class loop above.
+  renderTypingTarget();
+  if (hasError) typingMistakeCount += 1;
 
   // Auto-scroll display container to keep active typing character/cursor in comfortable view
   requestScrollTypingTarget();
@@ -2186,6 +2514,13 @@ function handleTypingInput() {
         combo: maxTypingComboInSentence,
         increment_words: false
       }, card);
+    }
+
+    // In a retrieval mode the sentence was produced from memory, so grade it and
+    // feed the spaced-repetition scheduler. Copy mode is transcription and must
+    // not be treated as evidence of learning.
+    if (currentPracticeMode !== "copy") {
+      recordRetrievalResult();
     }
 
     syncChannel.postMessage({
@@ -2417,9 +2752,45 @@ async function startRecording() {
     micBtn.querySelector(".mic-label").textContent = "正在聆听 · 点击结束";
     const waveContainer = document.getElementById("waveform-container");
     if (waveContainer) waveContainer.classList.add("active");
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // Without a live socket the captured audio has nowhere to go; releasing
+      // the device is the only correct outcome, and the user must be told.
+      setStatus("连接已断开，正在重连…", "thinking");
+      stopRecording();
+      showToast("语音连接尚未就绪，请稍后重试");
+      return;
+    }
     setStatus("Listening... Speak now", "listening");
   } catch (err) {
-    alert("Microphone access denied: " + err.message);
+    // Any failure after getUserMedia (AudioContext, ScriptProcessor, ...) would
+    // otherwise leave the microphone hot with no way to release it, because
+    // stopRecording() early-returns while isRecording is still false.
+    if (processor) {
+      try { processor.disconnect(); } catch (_) {}
+      processor = null;
+    }
+    if (gainNode) {
+      try { gainNode.disconnect(); } catch (_) {}
+      gainNode = null;
+    }
+    if (micStream) {
+      try { micStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+      micStream = null;
+    }
+    if (audioContext) {
+      try { audioContext.close(); } catch (_) {}
+      audioContext = null;
+    }
+    isRecording = false;
+    micBtn.className = "mic-button idle";
+    micBtn.querySelector(".mic-label").textContent = "点击或按住说话";
+    const waveContainer = document.getElementById("waveform-container");
+    if (waveContainer) waveContainer.classList.remove("active");
+    setStatus("麦克风不可用", "idle");
+    const isPermission = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
+    showToast(isPermission
+      ? "麦克风权限被拒绝，请在浏览器地址栏允许麦克风后重试"
+      : `麦克风启动失败: ${(err && err.message) || err}`);
   }
 }
 
@@ -2491,11 +2862,15 @@ function clearWaveform() {
   canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
-// Mouse / Touch Event Handlers supporting both Click and Hold
+// Mouse / Touch Event Handlers supporting both Click and Hold.
+// Semantics: a short click toggles recording on/off, a long press is
+// push-to-talk. `recordPressStartTime` therefore must NOT be reset while a
+// recording started by an earlier click is still running, otherwise the
+// "click again to stop" path can never see a press duration > the threshold.
 micBtn.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return;
-  recordPressStartTime = Date.now();
   if (!isRecording) {
+    recordPressStartTime = Date.now();
     startRecording();
   }
 });
@@ -2510,16 +2885,16 @@ micBtn.addEventListener("mouseup", () => {
 });
 
 micBtn.addEventListener("click", () => {
-  // If clicked while recording was already active from a previous click (> 300ms ago), stop
-  if (isRecording && (Date.now() - recordPressStartTime > 300)) {
+  // A short click that started this recording toggles it back off.
+  if (isRecording && (Date.now() - recordPressStartTime) <= 400) {
     stopRecording();
   }
 });
 
 micBtn.addEventListener("touchstart", (e) => {
   e.preventDefault();
-  recordPressStartTime = Date.now();
   if (!isRecording) {
+    recordPressStartTime = Date.now();
     startRecording();
   }
 });
@@ -2527,7 +2902,10 @@ micBtn.addEventListener("touchstart", (e) => {
 micBtn.addEventListener("touchend", (e) => {
   e.preventDefault();
   const pressDuration = Date.now() - recordPressStartTime;
-  if (pressDuration > 400 && isRecording) {
+  if (!isRecording) return;
+  // Touch has no synthesized click (touchstart is preventDefault'ed), so a tap
+  // must stop the recording here too, not only a >400ms long press.
+  if (pressDuration > 400 || pressDuration <= 400) {
     stopRecording();
   }
 });
@@ -2643,7 +3021,13 @@ function switchBetweenOralAndTyping(e) {
 }
 
 textInput.addEventListener("keydown", (e) => {
+  // While a Chinese/Japanese IME is composing, Enter commits the candidate and
+  // must never be treated as "send" (this box is explicitly bilingual, so every
+  // Chinese sentence hits this path).
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === "Enter") {
+    if (e.shiftKey) return; // allow multi-line entry
+    e.preventDefault();
     sendTextBtn.click();
   } else if (e.key === "Tab") {
     switchBetweenOralAndTyping(e);
@@ -2655,7 +3039,16 @@ function isTypingContext(el) {
   const tag = el.tagName ? el.tagName.toLowerCase() : "";
   if (tag === "input" || tag === "textarea" || tag === "select") return true;
   if (el.isContentEditable) return true;
-  if (el.closest && (el.closest("input, textarea, select, [contenteditable='true']") || el.closest(".shadow-typing-card") || el.closest(".modal") || el.closest(".current-focus-card"))) return true;
+  if (el.closest && (
+    el.closest("input, textarea, select, [contenteditable='true']")
+    || el.closest(".shadow-typing-card")
+    // Modals in this app use .modal-backdrop / .modal-dialog; the previous
+    // ".modal" selector matched nothing, so Space on a focused modal button
+    // started the microphone instead of activating the button.
+    || el.closest(".modal-backdrop")
+    || el.closest(".modal-dialog")
+    || el.closest(".current-focus-card")
+  )) return true;
   return false;
 }
 
@@ -2686,9 +3079,13 @@ window.addEventListener("keyup", (e) => {
 });
 
 function escapeHtml(text) {
+  if (text === null || text === undefined) return "";
   const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
+  div.textContent = String(text);
+  // textContent -> innerHTML escapes &, <, > and nbsp but NOT quotes, so using
+  // the result inside an attribute (data-text="...") allowed a quote in imported
+  // material or model output to break out and inject attributes/handlers.
+  return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 async function loadLectureDocuments() {
@@ -3284,6 +3681,13 @@ function renderPdfSentenceHighlights(sentences) {
 function highlightActivePdfSentence(index) {
   const overlay = document.getElementById("pdf-highlight-layer");
   if (!overlay) return;
+
+  // In a retrieval mode the highlighted sentence *is* the answer, so suppress it
+  // (the learner can still reveal with 👁 看答案).
+  if (typeof currentPracticeMode !== "undefined" && currentPracticeMode !== "copy") {
+    overlay.querySelectorAll(".pdf-sentence-box").forEach(b => b.classList.remove("active"));
+    return;
+  }
 
   const allBoxes = overlay.querySelectorAll(".pdf-sentence-box");
   let firstActiveEl = null;
@@ -4189,6 +4593,27 @@ if (typingDisplayEl) {
       return;
     }
 
+    // Backspace must stay available *after* a sentence completes: the learner
+    // needs to be able to fix the last character without clearing the whole
+    // card. Reopen the sentence so typing resumes normally.
+    if (e.key === "Backspace" && isTypingCompleted) {
+      e.preventDefault();
+      isTypingCompleted = false;
+      const typedCard = document.getElementById("shadow-typing-card");
+      if (typedCard) typedCard.classList.remove("completed");
+      const typedPill = document.getElementById("typing-status-pill");
+      if (typedPill) {
+        typedPill.className = "typing-status-pill active";
+        typedPill.textContent = "跟打中…";
+      }
+      if (typedBuffer.length > 0) {
+        typedBuffer = typedBuffer.slice(0, -1);
+        handleTypingBackspace(typedBuffer.length);
+        handleTypingInput();
+      }
+      return;
+    }
+
     if (!currentTypingTarget || isTypingCompleted) {
       if (e.key === "Enter" && e.shiftKey) {
         e.preventDefault();
@@ -4325,6 +4750,16 @@ if (typingRepeatBtn) {
     cycleTypingRepeatRounds();
   });
 }
+
+const typingModeBtn = document.getElementById("typing-mode-btn");
+if (typingModeBtn) {
+  typingModeBtn.addEventListener("click", () => cyclePracticeMode());
+}
+const typingRevealBtn = document.getElementById("typing-reveal-btn");
+if (typingRevealBtn) {
+  typingRevealBtn.addEventListener("click", () => revealTypingAnswer());
+}
+setPracticeMode(currentPracticeMode, { rerender: false });
 
 const typingWordSoundBtn = document.getElementById("typing-word-sound-btn");
 if (typingWordSoundBtn) {
@@ -4571,6 +5006,9 @@ function setTypingFullscreen(enable, triggerNative = true) {
   if (enable) {
     card.classList.add("fullscreen-mode");
     document.body.classList.add("typing-fullscreen-active");
+    // Group the reference material into the left grid column (see the
+    // .fs-left-col rules in style.css).
+    ensureFullscreenColumns();
     applyFsBgStyle();
 
     if (fsBtn) {
@@ -4614,6 +5052,8 @@ function setTypingFullscreen(enable, triggerNative = true) {
     card.classList.remove("bg-frosted");
     card.classList.remove("bg-black");
     document.body.classList.remove("typing-fullscreen-active");
+    // Unwrap the grid column before the card returns to its flex layout.
+    releaseFullscreenColumns();
     if (fsBtn) {
       fsBtn.classList.remove("active");
       fsBtn.title = "全屏沉浸跟打模式 (快捷键: F10 / Esc 退出)";
@@ -4641,8 +5081,43 @@ function setTypingFullscreen(enable, triggerNative = true) {
   }
 }
 
-function toggleTypingFullscreen() {
-  setTypingFullscreen(!isTypingFullscreenActive(), true);
+// Fullscreen immersive mode uses a two-column grid on wide screens so the
+// reference material (sentence + translation) sits BESIDE the typing surface
+// instead of stacking above it. A landscape monitor is height-constrained, and
+// the stacked layout needed more vertical space than a 1080p screen has.
+// The wrapper is created only while fullscreen is active, then unwrapped, so the
+// normal layout's flex order is never disturbed.
+const FS_LEFT_SELECTORS = [".sentence-preview-box", "#typing-translation-display", "#video-player-container"];
+
+function ensureFullscreenColumns() {
+  const card = document.getElementById("sentence-focus-card");
+  if (!card) return null;
+  let left = card.querySelector(":scope > .fs-left-col");
+  if (left) return left;
+
+  left = document.createElement("div");
+  left.className = "fs-left-col";
+  card.appendChild(left);
+  FS_LEFT_SELECTORS.forEach((sel) => {
+    const el = card.querySelector(sel);
+    if (el) left.appendChild(el);
+  });
+  return left;
+}
+
+function releaseFullscreenColumns() {
+  const card = document.getElementById("sentence-focus-card");
+  if (!card) return;
+  const left = card.querySelector(":scope > .fs-left-col");
+  if (!left) return;
+  // Put the blocks back where they came from, in their original order.
+  Array.from(left.children).forEach((child) => {
+    card.insertBefore(child, left);
+  });
+  left.remove();
+}
+
+function toggleTypingFullscreen() {  setTypingFullscreen(!isTypingFullscreenActive(), true);
 }
 
 function initTypingFullscreen() {
@@ -4712,6 +5187,14 @@ function initTypingFullscreen() {
 }
 
 // Pronunciation Evaluation UI
+function hidePronunciationResult() {
+  // The score card had no code path back to hidden, so a result for sentence 3
+  // stayed on screen — and looked like the current sentence's score — for every
+  // sentence afterwards.
+  const card = document.getElementById("pronunciation-card");
+  if (card) card.style.display = "none";
+}
+
 function displayPronunciationResult(evalResult, broadcast = true) {
   const card = document.getElementById("pronunciation-card");
   const badge = document.getElementById("pron-score-badge");
@@ -5374,6 +5857,12 @@ window.addEventListener("keydown", (e) => {
     toggleLoopPlayback();
     return;
   }
+  // Alt+M: Cycle the practice mode (copy -> cloze -> recall -> dictation)
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "m" || e.key === "M" || e.code === "KeyM")) {
+    e.preventDefault();
+    cyclePracticeMode();
+    return;
+  }
 }, true);
 
 // Notes actions
@@ -5864,7 +6353,13 @@ const OdometerEngine = {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    if (this.pendingWords.length === 0 || this.isFlushing) return;
+    if (this.pendingWords.length === 0) return;
+    if (this.isFlushing) {
+      // A flush is already in flight; make sure it runs again for the words that
+      // arrived meanwhile instead of stranding them.
+      this.flushTimer = setTimeout(() => this.flush(), 300);
+      return;
+    }
 
     const batch = [...this.pendingWords];
     this.pendingWords = [];
@@ -5915,6 +6410,14 @@ const OdometerEngine = {
       this.pendingWords = batch.concat(this.pendingWords);
     } finally {
       this.isFlushing = false;
+      // Re-arm whenever work remains. Previously a batch that crossed the
+      // 5-word threshold during an in-flight POST returned early and scheduled
+      // nothing, so it sat in memory until the next keystroke, sentence end, or
+      // page unload -- a browser kill lost those words.
+      if (this.pendingWords.length > 0) {
+        if (this.flushTimer) clearTimeout(this.flushTimer);
+        this.flushTimer = setTimeout(() => this.flush(), 300);
+      }
     }
   },
 
@@ -6088,6 +6591,28 @@ function initGamificationModal() {
   if (levelGroup) levelGroup.addEventListener("click", () => openModal("ranks"));
   if (refreshBossBtn) refreshBossBtn.addEventListener("click", loadMistakesRushList);
 
+  const reviewRefreshBtn = document.getElementById("review-refresh-btn");
+  const reviewSeedBtn = document.getElementById("review-seed-btn");
+  if (reviewRefreshBtn) reviewRefreshBtn.addEventListener("click", () => loadReviewPanel());
+  if (reviewSeedBtn) reviewSeedBtn.addEventListener("click", async () => {
+    reviewSeedBtn.disabled = true;
+    reviewSeedBtn.textContent = "建档中…";
+    try {
+      const res = await fetch("/api/review/seed", { method: "POST" });
+      const data = await res.json();
+      if (data && data.seeded) {
+        const total = Object.values(data.seeded).reduce((a, b) => a + (b || 0), 0);
+        showToast(`📥 复习库已建立：新增 ${total} 个条目`);
+      }
+      await loadReviewPanel();
+    } catch (err) {
+      showToast("建档失败: " + err.message);
+    } finally {
+      reviewSeedBtn.disabled = false;
+      reviewSeedBtn.textContent = "📥 从我的数据建档";
+    }
+  });
+
   const odometerHudBtn = document.getElementById("hud-odometer-pill");
   const odometerTypingBtn = document.getElementById("typing-odometer-pill");
   const odometerFsBtn = document.getElementById("fs-odometer-pill");
@@ -6108,6 +6633,7 @@ function initGamificationModal() {
     });
     const contents = {
       "quests": document.getElementById("tab-content-quests"),
+      "review": document.getElementById("tab-content-review"),
       "boss": document.getElementById("tab-content-boss"),
       "ranks": document.getElementById("tab-content-ranks"),
       "odometer": document.getElementById("tab-content-odometer")
@@ -6117,6 +6643,7 @@ function initGamificationModal() {
     });
 
     if (tabName === "quests") loadQuestsList();
+    else if (tabName === "review") loadReviewPanel();
     else if (tabName === "boss") loadMistakesRushList();
     else if (tabName === "ranks") loadRanksTree();
     else if (tabName === "odometer") loadOdometerDashboard();
@@ -6158,6 +6685,109 @@ function initGamificationModal() {
       }).join("");
     } catch (err) {
       listEl.innerHTML = `<div style="text-align:center; color:#dc2626; padding:20px;">加载失败: ${err.message}</div>`;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Spaced repetition panel: "what should I review right now?"
+  // ---------------------------------------------------------------
+  async function loadReviewPanel() {
+    const listEl = document.getElementById("modal-review-list");
+    if (!listEl) return;
+    listEl.innerHTML = '<div style="text-align:center; color:#64748b; padding:20px;">正在计算今日复习队列…</div>';
+
+    try {
+      const res = await fetch("/api/review/queue?limit=25");
+      const data = await res.json();
+      updateReviewStats(data.stats || {});
+      const items = data.items || [];
+
+      if (items.length === 0) {
+        listEl.innerHTML = `
+          <div style="text-align:center; color:#64748b; padding:24px; line-height:1.7;">
+            今天没有到期复习内容 🎉<br>
+            <span style="font-size:12px;">点击右上角「📥 从我的数据建档」把已有的错题、生词释义与跟打记录导入复习库。</span>
+          </div>`;
+      } else {
+        listEl.innerHTML = items.map(item => {
+          const stateLabel = { new: "新词", learning: "学习中", review: "复习中", relearn: "重学" }[item.state] || item.state;
+          const dueText = item.state === "new" ? "未学习" : `下次: ${String(item.due_at || "").slice(0, 10)}`;
+          return `
+            <div class="boss-card" data-item-id="${item.id}">
+              <div class="boss-card-main">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+                  <span class="review-item-state state-${escapeHtml(item.state)}">${escapeHtml(stateLabel)}</span>
+                  <span style="font-size:11px; color:var(--muted);">熟练度 ${Number(item.stability || 0).toFixed(1)} 天 · ${escapeHtml(dueText)}</span>
+                </div>
+                <div class="boss-sentence">${escapeHtml(item.prompt || item.answer || "")}</div>
+                ${item.context ? `<div style="font-size:12px; color:var(--muted); margin-top:6px;">${escapeHtml(item.context.slice(0, 120))}</div>` : ""}
+              </div>
+              <div class="boss-card-actions">
+                <button class="btn btn-xs btn-quiet review-grade-btn" data-rating="1" title="完全想不起来">😵 忘记</button>
+                <button class="btn btn-xs btn-quiet review-grade-btn" data-rating="2" title="想起来但很吃力">😅 困难</button>
+                <button class="btn btn-xs btn-primary review-grade-btn" data-rating="3" title="正常回忆起来">🙂 记得</button>
+                <button class="btn btn-xs btn-accent review-grade-btn" data-rating="4" title="脱口而出">⚡ 简单</button>
+              </div>
+            </div>`;
+        }).join("");
+
+        listEl.querySelectorAll(".boss-card").forEach(card => {
+          const itemId = Number(card.dataset.itemId);
+          card.querySelectorAll(".review-grade-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+              const rating = Number(btn.dataset.rating);
+              btn.disabled = true;
+              try {
+                const gradeRes = await fetch("/api/review/grade", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ item_id: itemId, rating, mode: "recall" })
+                });
+                if (!gradeRes.ok) throw new Error(`HTTP ${gradeRes.status}`);
+                const graded = await gradeRes.json();
+                if (graded.stats) updateReviewStats(graded.stats);
+                const nextDue = graded.item && graded.item.due_at ? String(graded.item.due_at).slice(0, 10) : "?";
+                card.style.transition = "opacity 0.25s ease, transform 0.25s ease";
+                card.style.opacity = "0";
+                card.style.transform = "translateX(24px)";
+                setTimeout(() => { card.remove(); }, 260);
+                showToast(`已安排下次复习：${nextDue}`);
+              } catch (err) {
+                btn.disabled = false;
+                showToast("评分失败: " + err.message);
+              }
+            });
+          });
+        });
+      }
+
+      await loadReviewForecast();
+    } catch (err) {
+      listEl.innerHTML = `<div style="text-align:center; color:#dc2626; padding:20px;">加载失败: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  async function loadReviewForecast() {
+    const el = document.getElementById("review-forecast");
+    if (!el) return;
+    try {
+      const res = await fetch("/api/review/stats?days=14");
+      const data = await res.json();
+      const forecast = (data.forecast || []).slice(0, 14);
+      if (!forecast.length) { el.innerHTML = ""; return; }
+      const peak = Math.max(1, ...forecast.map(f => f.due || 0));
+      const bars = forecast.map(f => {
+        const pct = Math.round(((f.due || 0) / peak) * 100);
+        return `<div class="review-forecast-col" title="${escapeHtml(f.date)}: ${f.due} 条">
+            <div class="review-forecast-fill" style="height:${Math.max(2, pct)}%"></div>
+            <span class="review-forecast-label">${escapeHtml(String(f.day_offset))}d</span>
+          </div>`;
+      }).join("");
+      el.innerHTML = `
+        <div style="font-size:12px; color:var(--muted); margin-top:6px;">未来 14 天复习负载（条/天）</div>
+        <div class="review-forecast-bar">${bars}</div>`;
+    } catch (_) {
+      el.innerHTML = "";
     }
   }
 

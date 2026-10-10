@@ -37,9 +37,11 @@ from src.core.llm import LlmCoach, TEACHING_STYLES
 from src.core.documents import DocumentError, DocumentLibrary
 from src.core.notes_manager import NotesManager
 from src.core.gamification import GamificationManager
-from src.core.evaluator import evaluate_pronunciation
+from src.core.evaluator import evaluate_pronunciation, grade_dictation, mask_for_cloze
 from src.core.translation import translation_service
 from src.core.progress import ProgressManager
+from src.core import srs
+from src.core.media_janitor import media_dir_usage, sweep_media_dir
 from src.core.web_importer import process_web_or_text_import
 from src.core.ai_practice_generator import generate_ai_practice_document, AI_PRACTICE_PRESETS
 from src.core.notes_generator import smart_notes_generator
@@ -91,23 +93,99 @@ def get_document_executor() -> ThreadPoolExecutor:
         document_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="documents")
     return document_executor
 
+def _run_blocking(fn, *args, **kwargs):
+    """Run a synchronous SQLite / scheduling call off the event loop.
+
+    SQLite calls use a 10s busy timeout, so running them inline in an async
+    handler could stall the microphone pump and the coach stream for seconds
+    whenever another connection held the write lock.
+    """
+    loop = asyncio.get_running_loop()
+    return loop.run_in_executor(get_document_executor(), lambda: fn(*args, **kwargs))
+
+
 MAX_AUDIO_FRAME_BYTES = 1024 * 1024
 MAX_TEXT_INPUT_CHARS = 4000
+MAX_TTS_TEXT_CHARS = 3000
 MIN_TTS_SPEED = 0.5
 MAX_TTS_SPEED = 2.0
+
+# Housekeeping cadence for the media store. Long enough to be invisible, short
+# enough that an aborted download cannot accumulate for a whole session.
+MEDIA_SWEEP_INTERVAL_SECONDS = 6 * 3600
+
+
+def _owned_media_names() -> list:
+    """Media filenames currently claimed by a registered document."""
+    try:
+        return [getattr(spec, "media_filename", None) for spec in document_library.specs.values()]
+    except Exception:
+        logger.debug("Could not enumerate document media filenames", exc_info=True)
+        return []
+
+
+async def _periodic_media_sweep() -> None:
+    while True:
+        await asyncio.sleep(MEDIA_SWEEP_INTERVAL_SECONDS)
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                get_document_executor(), sweep_media_dir, MEDIA_DIR, _owned_media_names()
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Periodic media sweep failed", exc_info=True)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    get_asr_executor()
+    asr_pool = get_asr_executor()
     get_tts_executor()
     get_document_executor()
+
+    # Warm the ASR model at startup, off the event loop. Building the SenseVoice
+    # recogniser takes ~0.5s and used to happen inside the WebSocket handshake,
+    # stalling every other request (and the audio pump) on first connect.
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(asr_pool, get_asr)
+    except Exception:
+        logger.exception("Failed to preload the ASR model; it will be retried on demand")
+
+    # Sweep download artefacts and unowned media. Interrupted imports used to
+    # leave multi-megabyte files in data/media forever (one 5.31 MB .part had
+    # been there for weeks), and nothing else in the project reclaims them.
+    async def _media_sweep() -> None:
+        try:
+            report = await loop.run_in_executor(get_document_executor(), sweep_media_dir, MEDIA_DIR, _owned_media_names())
+            removed = len(report.get("partials_removed", [])) + len(report.get("orphans_removed", []))
+            if removed:
+                logger.info(
+                    "Media sweep removed %s file(s), reclaiming %.2f MB",
+                    removed, int(report.get("bytes_reclaimed", 0)) / 1048576,
+                )
+        except Exception:
+            logger.warning("Media sweep failed", exc_info=True)
+
+    await _media_sweep()
+
+    sweep_task = asyncio.create_task(_periodic_media_sweep())
     yield
+    sweep_task.cancel()
+    try:
+        await sweep_task
+    except (asyncio.CancelledError, Exception):
+        pass
     await runtime.close()
     try:
         await translation_service.close()
     except Exception:
         pass
+    try:
+        await smart_notes_generator.cancel_prefetch()
+    except Exception:
+        logger.warning("Failed to cancel background whiteboard pre-generation", exc_info=True)
     try:
         await smart_notes_generator.close()
     except Exception:
@@ -284,6 +362,14 @@ async def tts_post_endpoint(payload: dict = Body(...)):
     text_val = str(payload.get("text", "")).strip()
     if not text_val:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+    # The GET variant declares Query(max_length=3000); calling the handler
+    # directly here bypassed that validation entirely and let an arbitrarily
+    # long string reach the synthesis engine.
+    if len(text_val) > MAX_TTS_TEXT_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Text is limited to {MAX_TTS_TEXT_CHARS} characters.",
+        )
     voice = payload.get("voice")
     speed = payload.get("speed")
     try:
@@ -779,8 +865,13 @@ async def translation_status_endpoint():
 
 
 @app.post("/api/system/shutdown")
-async def system_shutdown_endpoint():
+async def system_shutdown_endpoint(request: Request):
     """Cleanly and completely terminate the server and related background processes."""
+    # Destructive and irreversible: it kills the server and the app window.
+    # Any web page the browser loads could otherwise POST this cross-site, so it
+    # gets the same loopback/same-origin gate as the model control endpoints.
+    require_local_model_control(request)
+
     def _do_shutdown():
         import time, subprocess
         time.sleep(0.4)
@@ -803,7 +894,10 @@ async def list_notes_endpoint(limit: int = 50, document_id: str = None, only_mis
         except (ValueError, TypeError):
             parsed_limit = 50
         safe_limit = max(1, min(parsed_limit, 200))
-        notes = NotesManager.list_notes(limit=safe_limit, document_id=document_id, only_mistakes=only_mistakes)
+        notes = await _run_blocking(
+            NotesManager.list_notes,
+            limit=safe_limit, document_id=document_id, only_mistakes=only_mistakes,
+        )
         return {"notes": notes}
     except Exception as exc:
         logger.exception("Failed to list notes")
@@ -896,7 +990,7 @@ async def export_anki_endpoint(document_id: str = None, only_mistakes: bool = Fa
 @app.get("/api/game/status")
 async def get_game_status_endpoint():
     try:
-        return GamificationManager.get_status()
+        return await _run_blocking(GamificationManager.get_status)
     except Exception as exc:
         logger.exception("Failed to get game status")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -911,7 +1005,7 @@ VALID_GAME_ACTIONS = {
 @app.get("/api/game/odometer")
 async def get_game_odometer_endpoint():
     try:
-        return GamificationManager.get_odometer_stats()
+        return await _run_blocking(GamificationManager.get_odometer_stats)
     except Exception as exc:
         logger.exception("Failed to get odometer stats")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -976,6 +1070,12 @@ async def record_game_action_endpoint(payload: dict = Body(...)):
         words_list = payload.get("words_list")
         if not isinstance(words_list, list):
             words_list = None
+
+        # The lifetime counter and typed_words_log must agree. They drifted by
+        # ~26% in practice because a client could send words_count with nothing
+        # to log, so the odometer moved while the per-word stats did not.
+        if increment_words and not words_list and not (sentence_text or "").strip():
+            words_count = 0
         document_id = payload.get("document_id")
         sentence_index = payload.get("sentence_index")
 
@@ -1005,17 +1105,220 @@ async def get_mistakes_rush_endpoint(limit: int = 30):
             safe_limit = max(1, min(int(limit), 100))
         except (ValueError, TypeError):
             safe_limit = 30
-        mistakes = GamificationManager.get_mistakes_rush(limit=safe_limit)
+        mistakes = await _run_blocking(GamificationManager.get_mistakes_rush, limit=safe_limit)
         return {"mistakes": mistakes}
     except Exception as exc:
         logger.exception("Failed to get mistakes rush")
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+# ---------------------------------------------------------------------------
+# Spaced repetition (SRS)
+#
+# The old "review" feature was a recency-ordered list of mistakes whose only
+# completion action deleted the item for XP. These endpoints expose a real
+# scheduler: due queue, grading, forecast and mastery state.
+# ---------------------------------------------------------------------------
+
+class ReviewGradeRequest(BaseModel):
+    item_id: int
+    rating: int
+    mode: Optional[str] = "recall"
+    latency_ms: Optional[int] = None
+
+
+@app.get("/api/review/queue")
+async def review_queue_endpoint(
+    limit: int = 20,
+    document_id: Optional[str] = None,
+    kinds: Optional[str] = None,
+    include_new: bool = True,
+):
+    """Return the interleaved due queue plus current SRS counters."""
+    try:
+        safe_limit = max(1, min(int(limit or 20), 200))
+    except (ValueError, TypeError):
+        safe_limit = 20
+    kind_list = [k.strip() for k in (kinds or "").split(",") if k.strip()] or None
+    try:
+        items = await _run_blocking(
+            srs.due_items,
+            limit=safe_limit,
+            kinds=kind_list,
+            document_id=document_id,
+            include_new=include_new,
+        )
+        stats = await _run_blocking(srs.queue_stats)
+        return {"items": items, "stats": stats, "count": len(items)}
+    except Exception as exc:
+        logger.exception("Failed to build review queue")
+        raise HTTPException(status_code=500, detail="Failed to build review queue") from exc
+
+
+@app.post("/api/review/grade")
+async def review_grade_endpoint(req: ReviewGradeRequest):
+    """Apply one graded review and return the rescheduled item."""
+    if req.rating not in srs.VALID_RATINGS:
+        raise HTTPException(status_code=400, detail=f"rating must be one of {srs.VALID_RATINGS}")
+    try:
+        item = await _run_blocking(
+            srs.grade_item,
+            req.item_id,
+            req.rating,
+            mode=req.mode or "recall",
+            latency_ms=req.latency_ms,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to grade review item")
+        raise HTTPException(status_code=500, detail="Failed to grade review item") from exc
+    if item is None:
+        raise HTTPException(status_code=404, detail="Review item not found")
+    stats = await _run_blocking(srs.queue_stats)
+    return {"success": True, "item": item, "stats": stats}
+
+
+@app.get("/api/review/stats")
+async def review_stats_endpoint(days: int = 14):
+    try:
+        safe_days = max(1, min(int(days or 14), 180))
+    except (ValueError, TypeError):
+        safe_days = 14
+    stats = await _run_blocking(srs.queue_stats)
+    projection = await _run_blocking(srs.forecast, days=safe_days)
+    mastery = await _run_blocking(srs.mastery_summary)
+    return {"stats": stats, "forecast": projection, "mastery": mastery}
+
+
+@app.post("/api/review/seed")
+async def review_seed_endpoint():
+    """Seed review items from data the app already stores (idempotent)."""
+    try:
+        result = await _run_blocking(srs.seed_all)
+        stats = await _run_blocking(srs.queue_stats)
+        return {"success": True, "seeded": result, "stats": stats}
+    except Exception as exc:
+        logger.exception("Failed to seed review items")
+        raise HTTPException(status_code=500, detail="Failed to seed review items") from exc
+
+
+@app.get("/api/review/mastery")
+async def review_mastery_endpoint():
+    try:
+        return await _run_blocking(srs.mastery_summary)
+    except Exception as exc:
+        logger.exception("Failed to compute mastery summary")
+        raise HTTPException(status_code=500, detail="Failed to compute mastery summary") from exc
+
+
+class PrefetchRequest(BaseModel):
+    sentences: list[str] = []
+    ahead: Optional[int] = None
+
+
+@app.post("/api/sentence/notes-prefetch")
+async def notes_prefetch_endpoint(req: PrefetchRequest):
+    """Warm whiteboard notes for upcoming sentences in the background.
+
+    NVIDIA NIM is free but slow (measured 13-38s per board), so generating the
+    next few boards ahead of time means the learner sees them instantly when they
+    navigate. Returns immediately; the work happens in background tasks.
+    """
+    queued = smart_notes_generator.schedule_prefetch(req.sentences, ahead=req.ahead)
+    return {"success": True, "queued": queued, "status": smart_notes_generator.prefetch_status()}
+
+
+@app.get("/api/sentence/notes-prefetch/status")
+async def notes_prefetch_status_endpoint():
+    return smart_notes_generator.prefetch_status()
+
+
+@app.get("/api/media/usage")
+async def media_usage_endpoint():
+    """Report how much disk the media store is using."""
+    usage = await _run_blocking(media_dir_usage, MEDIA_DIR)
+    usage["human"] = f"{usage['bytes'] / 1048576:.1f} MB"
+    return usage
+
+
+@app.post("/api/media/sweep")
+async def media_sweep_endpoint(dry_run: bool = False):
+    """Remove aborted-download artefacts and media no document owns.
+
+    Conservative by design: partial files must be older than an hour and
+    unreferenced complete files older than a week, so an in-flight import is
+    never disturbed. Pass ``?dry_run=true`` to preview.
+    """
+    report = await _run_blocking(
+        sweep_media_dir,
+        MEDIA_DIR,
+        _owned_media_names(),
+        dry_run=dry_run,
+    )
+    report["reclaimed_human"] = f"{int(report.get('bytes_reclaimed', 0)) / 1048576:.2f} MB"
+    if not dry_run and int(report.get("bytes_reclaimed", 0)) > 0:
+        logger.info(
+            "Manual media sweep reclaimed %s (%s partials, %s orphans)",
+            report["reclaimed_human"],
+            len(report.get("partials_removed", [])),
+            len(report.get("orphans_removed", [])),
+        )
+    return report
+
+
+class DictationGradeRequest(BaseModel):
+    target_text: str
+    typed_text: str
+    item_id: Optional[int] = None
+    mode: Optional[str] = "dictation"
+    apply_to_srs: bool = False
+
+
+@app.post("/api/practice/grade-dictation")
+async def grade_dictation_endpoint(req: DictationGradeRequest):
+    """Grade a recall/dictation attempt, optionally feeding the result to the SRS."""
+    target = (req.target_text or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="target_text is required")
+    if len(target) > MAX_TEXT_INPUT_CHARS:
+        raise HTTPException(status_code=413, detail=f"target_text is limited to {MAX_TEXT_INPUT_CHARS} characters.")
+
+    result = grade_dictation(target, req.typed_text or "")
+    item = None
+    if req.apply_to_srs and req.item_id:
+        try:
+            item = await _run_blocking(
+                srs.grade_item,
+                req.item_id,
+                int(result["grade"]),
+                mode=req.mode if req.mode in srs.VALID_MODES else "dictation",
+            )
+        except Exception:
+            logger.exception("Failed to apply dictation result to SRS")
+    return {"success": True, "result": result, "item": item}
+
+
+class ClozeRequest(BaseModel):
+    text: str
+    hide_ratio: Optional[float] = 0.4
+
+
+@app.post("/api/practice/cloze")
+async def cloze_endpoint(req: ClozeRequest):
+    """Produce a cloze version of a sentence for recall practice."""
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    ratio = req.hide_ratio if isinstance(req.hide_ratio, (int, float)) else 0.4
+    masked, hidden = mask_for_cloze(text, hide_ratio=float(ratio))
+    return {"success": True, "masked_text": masked, "hidden_words": hidden}
+
+
 @app.post("/api/game/mistakes/cleanse/{note_id}")
 async def cleanse_mistake_endpoint(note_id: int):
     try:
-        res = GamificationManager.cleanse_mistake(note_id=note_id)
+        res = await _run_blocking(GamificationManager.cleanse_mistake, note_id=note_id)
         return res
     except Exception as exc:
         logger.exception("Failed to cleanse mistake")
@@ -1024,7 +1327,7 @@ async def cleanse_mistake_endpoint(note_id: int):
 @app.get("/api/progress")
 async def get_progress_endpoint():
     try:
-        return ProgressManager.get_progress()
+        return await _run_blocking(ProgressManager.get_progress)
     except Exception as exc:
         logger.exception("Failed to get learning progress")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -1149,13 +1452,27 @@ async def websocket_chat(websocket: WebSocket):
     active_sentence_index = None
     active_sentence_action = "explain"
     current_task = None
+    speech_task = None
     turn_generation = 0
     send_lock = asyncio.Lock()
     lecture_context = None
     is_transcribing = False
 
+    def is_coach_speaking() -> bool:
+        """True while a coach turn is actively generating or streaming.
+
+        Deliberately excludes `is_transcribing`: this guards the "Listening..."
+        status, and transcription itself must not suppress its own prompt.
+        """
+        return bool(current_task and not current_task.done())
+
     def is_turn_busy() -> bool:
-        return is_transcribing or bool(current_task and not current_task.done())
+        """True when the session cannot accept new speech (transcribing or streaming).
+
+        Used to decide whether freshly flushed audio should be processed or
+        discarded, where both conditions genuinely mean "busy".
+        """
+        return is_transcribing or is_coach_speaking()
 
     def is_active_connection() -> bool:
         return active_websocket is websocket
@@ -1193,6 +1510,31 @@ async def websocket_chat(websocket: WebSocket):
                 logger.exception("Coach task failed while being cancelled")
         if current_task is task:
             current_task = None
+
+    def _reap_speech_task(task):
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Background speech task failed")
+
+    def dispatch_speech_processing():
+        """Run ASR off the receive loop so control frames keep flowing.
+
+        `websocket.receive()` is a single serialized pump: if an utterance is
+        transcribed inline, an `interrupt` (or any other control message) is not
+        read until transcription finishes. Scheduling the work as a task keeps
+        the stop button responsive during long transcriptions.
+        """
+        nonlocal speech_task
+        if is_transcribing:
+            # Already transcribing; the newest audio stays in the VAD buffer
+            # and will be processed by the next dispatch.
+            return
+        is_transcribing = True
+        speech_task = asyncio.create_task(process_user_speech())
+        speech_task.add_done_callback(_reap_speech_task)
 
     async def set_lecture_context(document_id, page_number, sentence_index=None):
         """Load and activate one textbook page before any lecture turn."""
@@ -1317,69 +1659,71 @@ async def websocket_chat(websocket: WebSocket):
         )
 
     async def process_user_speech():
+        """Transcribe the buffered utterance and route it to the right handler.
+
+        `is_transcribing` is owned by dispatch_speech_processing(), which sets it
+        before scheduling this coroutine. Every exit path must therefore clear it
+        — a leaked True would make is_turn_busy() permanently true and freeze the
+        session — so the whole body runs under a single try/finally.
+        """
         nonlocal is_transcribing
-        speech_audio = vad.get_speech_audio()
-        if len(speech_audio) > 16000 * 0.25:  # At least 250ms
+        try:
+            speech_audio = vad.get_speech_audio()
+            if len(speech_audio) <= 16000 * 0.25:  # Under 250ms: ignore.
+                if not is_coach_speaking():
+                    await send_event({"type": "status", "text": "Listening..."})
+                return
+
             logger.info(f"Processing speech: {len(speech_audio)} samples ({len(speech_audio)/16000:.2f}s)")
             await send_event({"type": "status", "text": "Transcribing speech..."})
-            is_transcribing = True
             try:
                 loop = asyncio.get_running_loop()
                 user_text = await loop.run_in_executor(
                     get_asr_executor(), asr.transcribe, speech_audio, 16000
                 )
             except asyncio.CancelledError:
-                is_transcribing = False
                 raise
             except Exception as exc:
-                is_transcribing = False
                 logger.exception("ASR failed")
                 await send_event({"type": "error", "message": f"Speech recognition failed: {exc}"})
                 await send_event({"type": "status", "text": "Listening..."})
                 return
 
             if not is_active_connection():
-                is_transcribing = False
                 return
-            if user_text:
-                logger.info(f"User speech transcribed: '{user_text}'")
-                if active_action_mode in ("read_only", "continuous_read"):
-                    is_transcribing = False
-                    logger.info("Ignoring ambient speech in read_only mode")
-                    await send_event({"type": "status", "text": "纯读模式（已屏蔽麦克风）"})
-                    return
-                if active_sentence_action == "practice":
-                    if active_target_sentence:
-                        eval_result = evaluate_pronunciation(active_target_sentence, user_text)
-                        await send_event({"type": "pronunciation_eval", "eval": eval_result}, turn_generation)
-                        if eval_result.get("score", 100) < 80:
-                            try:
-                                NotesManager.save_mistake(
-                                    sentence_text=active_target_sentence,
-                                    mistake_type="pronunciation",
-                                    mistake_detail=f"得分 {eval_result['score']}分，识别: '{user_text}'",
-                                    document_id=lecture_context.get("id") if lecture_context else None,
-                                    document_title=lecture_context.get("title") if lecture_context else None,
-                                    page_number=lecture_context.get("page") if lecture_context else None,
-                                    sentence_index=active_sentence_index,
-                                )
-                            except Exception:
-                                logger.exception("Failed to auto-save pronunciation mistake")
-                    await send_event({"type": "status", "text": "跟读评测完成，请查看打分反馈"})
-                    is_transcribing = False
-                    return
-                try:
-                    await start_turn(user_text)
-                finally:
-                    is_transcribing = False
-            else:
-                is_transcribing = False
+            if not user_text:
                 logger.info("Speech transcribed to empty string")
-                if not is_turn_busy():
+                if not is_coach_speaking():
                     await send_event({"type": "status", "text": "Listening..."})
-        else:
-            if not is_turn_busy():
-                await send_event({"type": "status", "text": "Listening..."})
+                return
+
+            logger.info(f"User speech transcribed: '{user_text}'")
+            if active_action_mode in ("read_only", "continuous_read"):
+                logger.info("Ignoring ambient speech in read_only mode")
+                await send_event({"type": "status", "text": "纯读模式（已屏蔽麦克风）"})
+                return
+            if active_sentence_action == "practice":
+                if active_target_sentence:
+                    eval_result = evaluate_pronunciation(active_target_sentence, user_text)
+                    await send_event({"type": "pronunciation_eval", "eval": eval_result}, turn_generation)
+                    if eval_result.get("score", 100) < 80:
+                        try:
+                            NotesManager.save_mistake(
+                                sentence_text=active_target_sentence,
+                                mistake_type="pronunciation",
+                                mistake_detail=f"得分 {eval_result['score']}分，识别: '{user_text}'",
+                                document_id=lecture_context.get("id") if lecture_context else None,
+                                document_title=lecture_context.get("title") if lecture_context else None,
+                                page_number=lecture_context.get("page") if lecture_context else None,
+                                sentence_index=active_sentence_index,
+                            )
+                        except Exception:
+                            logger.exception("Failed to auto-save pronunciation mistake")
+                await send_event({"type": "status", "text": "跟读评测完成，请查看打分反馈"})
+                return
+            await start_turn(user_text)
+        finally:
+            is_transcribing = False
 
 
     try:
@@ -1402,7 +1746,7 @@ async def websocket_chat(websocket: WebSocket):
                 
                 if utterance_done:
                     logger.info("VAD detected end of utterance from audio stream")
-                    await process_user_speech()
+                    dispatch_speech_processing()
 
             # Handle JSON control events
             elif "text" in message and message["text"]:
@@ -1420,7 +1764,22 @@ async def websocket_chat(websocket: WebSocket):
                     logger.info("Received audio_end signal from client")
                     vad.flush()
                     if not is_turn_busy():
-                        await process_user_speech()
+                        # The client releasing the mic is an explicit "process
+                        # this now" gesture, and it is also the last message of
+                        # the interaction, so transcribing inline here costs
+                        # nothing and keeps the reply ordering deterministic.
+                        is_transcribing = True
+                        try:
+                            await process_user_speech()
+                        finally:
+                            is_transcribing = False
+                    else:
+                        # The user stopped while the coach was still talking.
+                        # Keeping the flushed audio would prepend it to the
+                        # next utterance (get_speech_audio concatenates every
+                        # buffered segment) and corrupt the next transcript.
+                        vad.reset()
+                        logger.info("Discarded audio flushed during a busy turn")
 
                 elif msg_type == "set_lecture_context":
                     document_id = data.get("document_id", data.get("doc_id"))
@@ -1466,6 +1825,12 @@ async def websocket_chat(websocket: WebSocket):
                     except (ValueError, TypeError):
                         sentence_index = 1
                     action = str(data.get("action", "explain"))
+                    # Only "practice" makes later microphone input a scored
+                    # reading of this sentence. Any other action returns the
+                    # session to normal voice conversation.
+                    if action != "practice":
+                        active_sentence_action = "explain"
+                        active_target_sentence = ""
                     logger.info(f"Triggering lecture sentence: index={sentence_index}, action={action}")
                     if lecture_context:
                         ProgressManager.save_progress(
@@ -1570,6 +1935,14 @@ async def websocket_chat(websocket: WebSocket):
                 elif msg_type == "set_action_mode":
                     mode = str(data.get("mode", "explain"))
                     active_action_mode = mode
+                    # Leaving practice mode must also clear the pending practice
+                    # target. Otherwise active_sentence_action stays "practice"
+                    # forever, and every later utterance is scored as a reading
+                    # of the previous sentence instead of reaching the coach.
+                    if mode != "practice":
+                        active_sentence_action = "explain"
+                        active_target_sentence = ""
+                        active_sentence_index = None
                     logger.info(f"Updated active action mode: {active_action_mode}")
                     await send_event({"type": "action_mode_updated", "mode": active_action_mode})
 
@@ -1587,6 +1960,12 @@ async def websocket_chat(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}", exc_info=True)
     finally:
+        if speech_task is not None and not speech_task.done():
+            speech_task.cancel()
+            try:
+                await speech_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await cancel_current_turn()
         async with active_websocket_lock:
             if active_websocket is websocket:

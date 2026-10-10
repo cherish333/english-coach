@@ -1,4 +1,5 @@
 import sqlite3
+import contextlib
 import datetime
 import re
 from typing import Dict, Any, List, Optional
@@ -204,7 +205,15 @@ class GamificationManager:
         }
 
     @staticmethod
-    def _ensure_daily_quests(conn: sqlite3.Connection, date_str: str):
+    def _ensure_daily_quests(conn: sqlite3.Connection, date_str: str, *, own_transaction: bool = True):
+        """Create today's default quests if they are missing.
+
+        ``own_transaction`` must be False when called from inside another
+        transaction (record_action): Python's sqlite3 ``Connection.__exit__``
+        commits, so opening a nested ``with conn:`` here committed the word rows
+        and quest rows *while XP and the lifetime counter could still roll back*,
+        leaving partially applied actions.
+        """
         row = conn.execute("SELECT COUNT(*) as c FROM daily_quests WHERE quest_date = ?", (date_str,)).fetchone()
         if not row or row["c"] == 0:
             defaults = [
@@ -212,7 +221,8 @@ class GamificationManager:
                 ("pronunciation", "🎙️ 发音评测达到 85 分以上 2 次", 2, 60),
                 ("dialogue", "💬 与 AI 外教口语互动交流 2 次", 2, 45)
             ]
-            with conn:
+            context = conn if own_transaction else contextlib.nullcontext()
+            with context:
                 for q_type, q_title, target, reward in defaults:
                     conn.execute("""
                         INSERT INTO daily_quests (quest_date, quest_type, title, target_count, current_count, xp_reward, is_completed)
@@ -392,9 +402,8 @@ class GamificationManager:
                 is_typing = action_type in ("typing_completed", "shadow_typing", "word_typed")
                 if action_type == "word_typed":
                     xp_gained = max(1, words_count)
-                    if increment_words:
-                        typed_words += words_count
                     w_items = words_list or ([sentence_text] if sentence_text else [])
+                    logged = 0
                     for raw in w_items:
                         clean = re.sub(r"[^a-zA-Z0-9'’\-]", "", raw).strip()
                         if clean:
@@ -403,26 +412,34 @@ class GamificationManager:
                                     word, clean_word, date_str, created_at, document_id, sentence_index
                                 ) VALUES (?, ?, ?, ?, ?, ?)
                             """, (raw.strip(), clean, today_str, now_str, document_id, sentence_index))
+                            logged += 1
+                    if increment_words:
+                        # Count what was actually logged so the lifetime odometer
+                        # and typed_words_log can never disagree.
+                        typed_words += logged
                 elif is_typing:
                     combo_bonus = min(combo, 25)
                     words_bonus = max(1, words_count // 3)
                     xp_gained = 15 + combo_bonus + words_bonus
                     mastered += 1
                     if increment_words:
-                        typed_words += words_count
                         # Log words to typed_words_log if available
                         w_items = words_list
                         if not w_items and sentence_text:
                             w_items = re.findall(r"[a-zA-Z0-9]+(?:['’\-][a-zA-Z0-9]+)*", sentence_text)
-                        if w_items:
-                            for raw in w_items:
-                                clean = re.sub(r"[^a-zA-Z0-9'’\-]", "", raw).strip()
-                                if clean:
-                                    conn.execute("""
-                                        INSERT INTO typed_words_log (
-                                            word, clean_word, date_str, created_at, document_id, sentence_index
-                                        ) VALUES (?, ?, ?, ?, ?, ?)
-                                    """, (raw.strip(), clean, today_str, now_str, document_id, sentence_index))
+                        logged = 0
+                        for raw in (w_items or []):
+                            clean = re.sub(r"[^a-zA-Z0-9'’\-]", "", raw).strip()
+                            if clean:
+                                conn.execute("""
+                                    INSERT INTO typed_words_log (
+                                        word, clean_word, date_str, created_at, document_id, sentence_index
+                                    ) VALUES (?, ?, ?, ?, ?, ?)
+                                """, (raw.strip(), clean, today_str, now_str, document_id, sentence_index))
+                                logged += 1
+                        # Prefer the logged count; fall back to the reported count
+                        # only when the caller sent no words to log at all.
+                        typed_words += logged if logged else max(0, words_count)
                     if combo > curr_max_combo:
                         curr_max_combo = combo
                 elif action_type in ("pronunciation_evaluated", "pronunciation_s_rank"):
@@ -443,7 +460,10 @@ class GamificationManager:
                     xp_gained = 10
 
                 # 3. Update Quests & Quest XP
-                GamificationManager._ensure_daily_quests(conn, today_str)
+                # own_transaction=False: we are already inside this action's
+                # transaction, and a nested commit here would persist half of it
+                # (word rows committed while XP could still roll back).
+                GamificationManager._ensure_daily_quests(conn, today_str, own_transaction=False)
                 completed_quests = []
                 quest_bonus_xp = 0
 

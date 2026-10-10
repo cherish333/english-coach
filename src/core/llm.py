@@ -464,8 +464,13 @@ class LlmCoach:
         history.append({"role": "user", "content": user_text})
 
         # Keep history within a sliding window before constructing the request.
-        if len(history) > MAX_HISTORY_TURNS * 2:
-            del history[:-(MAX_HISTORY_TURNS * 2)]
+        # Trim an even number of messages so the window still opens with a user
+        # turn: deleting a single message made every request from turn 13 on
+        # begin with an assistant message, which strict chat templates reject.
+        window = MAX_HISTORY_TURNS * 2
+        if len(history) > window:
+            overflow = len(history) - window
+            del history[:overflow + (overflow % 2)]
 
         committed = False
         try:

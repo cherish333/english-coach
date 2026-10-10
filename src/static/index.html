@@ -311,7 +311,7 @@
                 </div>
               </div>
 
-              <div id="sentence-preview-box" class="sentence-preview-box">
+              <div id="sentence-preview-box" class="sentence-preview-box" lang="en">
                 载入教材后，可在此逐句精读与跟读
               </div>
               <!-- 中文翻译显示区 (紧挨英文原句下方) -->
@@ -378,7 +378,7 @@
                   <button id="typing-undock-btn" class="btn btn-outline btn-xs" title="将跟打区域移回横屏主台">🖥️ 移回横屏</button>
                 </div>
 
-                <div class="typing-target-display" id="typing-target-display" tabindex="0" title="跟打练习区 (按 Tab 键可切换至上方口语互动)">
+                <div class="typing-target-display" id="typing-target-display" lang="en" tabindex="0" title="跟打练习区 (按 Tab 键可切换至上方口语互动)">
                   <span class="char-pending">载入教材后开始跟打练习</span>
                 </div>
                 <div class="typing-hint-bar">
@@ -399,6 +399,10 @@
                   </div>
 
                   <div class="typing-actions-group">
+                    <button id="typing-mode-btn" class="mini-icon-btn practice-mode-btn" title="练习模式：对照跟打 → 填空回忆 → 无提示默写 → 听写 (点击切换，Alt+M)">
+                      <span id="typing-mode-label">📖 对照跟打</span>
+                    </button>
+                    <button id="typing-reveal-btn" class="mini-icon-btn" style="display: none;" title="显示原文（会标注本次使用了提示）">👁 看答案</button>
                     <button id="typing-repeat-btn" class="mini-icon-btn repeat-mode-btn" title="单句跟打遍数模式：需敲打 1 / 2 / 3 遍才过关 (点击切换)">
                       <span id="typing-repeat-label">1遍</span>
                     </button>
@@ -457,7 +461,7 @@
             <button id="export-notes-btn" class="btn btn-xs btn-quiet" title="导出所有学习笔记为Markdown文件">📥 导出.md</button>
           </div>
         </div>
-        <div id="whiteboard-content" class="whiteboard-content">
+        <div id="whiteboard-content" class="whiteboard-content" lang="en">
           <div class="empty-state">
             <div class="empty-icon">✦</div>
             <h3>你的学习要点会实时出现在这里</h3>
@@ -603,11 +607,33 @@
       </div>
       <div class="game-tabs">
         <button class="game-tab-btn active" data-tab="quests">🎯 每日修炼挑战</button>
+        <button class="game-tab-btn" data-tab="review">🧠 间隔复习 (<span id="modal-review-badge">0</span>)</button>
         <button class="game-tab-btn" data-tab="boss">👾 错题歼灭战 (<span id="modal-mistakes-badge">0</span>)</button>
         <button class="game-tab-btn" data-tab="ranks">👑 等级与段位榜</button>
         <button class="game-tab-btn" data-tab="odometer">🚗 仪表盘总里程</button>
       </div>
       <div class="modal-body">
+        <!-- Tab 0: Spaced repetition -->
+        <div id="tab-content-review" class="game-tab-content" style="display: none;">
+          <div class="review-summary" id="review-summary">
+            <div class="review-stat"><span class="review-stat-val" id="review-due-count">–</span><span class="review-stat-label">今日待复习</span></div>
+            <div class="review-stat"><span class="review-stat-val" id="review-known-count">–</span><span class="review-stat-label">已掌握词条</span></div>
+            <div class="review-stat"><span class="review-stat-val" id="review-total-count">–</span><span class="review-stat-label">复习库总量</span></div>
+            <div class="review-stat"><span class="review-stat-val" id="review-accuracy">–</span><span class="review-stat-label">近 30 天正确率</span></div>
+          </div>
+          <div style="margin: 10px 0 12px; font-size: 12px; color: var(--muted); display:flex; justify-content:space-between; align-items:center; gap:10px;">
+            <span>按记忆曲线（FSRS 风格）安排到期复习：答对间隔拉长，答错当天重来。复习成绩直接决定这里排队的内容。</span>
+            <span style="display:flex; gap:6px; flex:0 0 auto;">
+              <button id="review-seed-btn" class="btn btn-xs btn-quiet" title="从已有错题、生词释义和跟打记录建立复习库">📥 从我的数据建档</button>
+              <button id="review-refresh-btn" class="btn btn-xs btn-quiet">刷新</button>
+            </span>
+          </div>
+          <div class="boss-rush-list" id="modal-review-list">
+            <div style="text-align:center; color:#64748b; padding:20px;">正在计算今日复习队列...</div>
+          </div>
+          <div id="review-forecast" style="margin-top:14px;"></div>
+        </div>
+
         <!-- Tab 1: Quests -->
         <div id="tab-content-quests" class="game-tab-content">
           <div class="quest-grid" id="modal-quests-list">

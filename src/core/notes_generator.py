@@ -3,7 +3,8 @@ import datetime
 import re
 import logging
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+import httpx
 from openai import AsyncOpenAI
 
 from src.config import (
@@ -12,9 +13,13 @@ from src.config import (
     NVIDIA_API_KEY,
     NVIDIA_BASE_URL,
     NVIDIA_MODEL,
+    NVIDIA_PREFETCH_ENABLED,
+    NVIDIA_PREFETCH_AHEAD,
+    NVIDIA_PREFETCH_CONCURRENCY,
 )
 from src.core.notes_manager import get_db_connection
 from src.core.translation import translation_service, is_valid_chinese_translation
+from src.core.api_resilience import AsyncRetrier, registry
 from src.core.model_runtime import RoutedClient
 
 logger = logging.getLogger("english_coach.smart_notes")
@@ -97,7 +102,21 @@ class SmartNotesGenerator:
         self._memory_cache: Dict[str, str] = {}
         self._nvidia_client: Optional[AsyncOpenAI] = None
         self._local_client: Optional[RoutedClient] = None
+        # Same provider state the translation service uses: NVIDIA NIM backs both
+        # the whiteboard and the glosses, so one set of counters tells the whole
+        # story about that provider's health.
+        self._nvidia = registry.register(
+            "nvidia", failure_threshold=3, cooldown=60.0, concurrency=4
+        )
+        self._retrier = AsyncRetrier(max_attempts=3, base_delay=0.5, max_delay=8.0)
+        # Background pre-generation bookkeeping (NVIDIA is free but slow).
+        self._prefetch_inflight: set = set()
+        self._prefetch_tasks: set = set()
+        self._prefetch_semaphore = asyncio.Semaphore(max(1, NVIDIA_PREFETCH_CONCURRENCY))
         self._init_db()
+
+    def nvidia_provider(self):
+        return self._nvidia
 
     def _init_db(self):
         conn = get_db_connection()
@@ -122,7 +141,10 @@ class SmartNotesGenerator:
             self._nvidia_client = AsyncOpenAI(
                 base_url=NVIDIA_BASE_URL,
                 api_key=NVIDIA_API_KEY,
-                timeout=35.0
+                # The AsyncRetrier owns retrying, so the SDK must not retry too:
+                # otherwise attempts multiply and the backoff is defeated.
+                max_retries=0,
+                timeout=httpx.Timeout(connect=5.0, read=60.0, write=15.0, pool=5.0),
             )
         return self._nvidia_client
 
@@ -156,7 +178,7 @@ class SmartNotesGenerator:
             ).fetchone()
             if row and row["notes_markdown"]:
                 notes = row["notes_markdown"]
-                self._memory_cache[cleaned] = notes
+                self._remember(cleaned, notes)
                 return notes
         except Exception as exc:
             logger.warning(f"Error querying smart notes cache: {exc}")
@@ -164,15 +186,41 @@ class SmartNotesGenerator:
             conn.close()
         return None
 
+    async def _cached_off_loop(self, sentence_text: str) -> Optional[str]:
+        """Non-blocking cache read."""
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self.get_cached, sentence_text)
+        except RuntimeError:
+            # No running loop (sync caller): fall back to a direct read.
+            return self.get_cached(sentence_text)
+
+    async def _save_cache_off_loop(self, sentence_text: str, notes_markdown: str, engine: str) -> None:
+        """Non-blocking cache write."""
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self.save_cache, sentence_text, notes_markdown, engine)
+        except RuntimeError:
+            self.save_cache(sentence_text, notes_markdown, engine)
+
+    def _remember(self, sentence_text: str, notes_markdown: str) -> None:
+        """Write to the memory cache with the size bound applied.
+
+        The read path used to assign directly into ``_memory_cache``, bypassing
+        the 500-entry cap the write path enforced, so simply reading through a
+        long book grew the process without limit (thousands of sentences x
+        2-4 KB of notes each).
+        """
+        self._memory_cache[sentence_text] = notes_markdown
+        while len(self._memory_cache) > 500:
+            oldest = next(iter(self._memory_cache))
+            self._memory_cache.pop(oldest, None)
+
     def save_cache(self, sentence_text: str, notes_markdown: str, engine: str = ""):
         cleaned = sentence_text.replace("\u00a0", " ").strip()
         if not cleaned or not notes_markdown.strip():
             return
-        self._memory_cache[cleaned] = notes_markdown.strip()
-        if len(self._memory_cache) > 500:
-            # Evict oldest entry
-            first_key = next(iter(self._memory_cache))
-            self._memory_cache.pop(first_key, None)
+        self._remember(cleaned, notes_markdown.strip())
 
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn = get_db_connection()
@@ -209,9 +257,12 @@ class SmartNotesGenerator:
                 "error": "Empty sentence text"
             }
 
-        # 1. Check cache if not forcing refresh
+        # 1. Check cache if not forcing refresh.
+        # get_cached() is synchronous SQLite with a 10s busy timeout, so running
+        # it inline would stall the event loop (and the audio pump / coach
+        # stream) whenever another connection held the write lock.
         if not force_refresh:
-            cached_notes = self.get_cached(cleaned)
+            cached_notes = await self._cached_off_loop(cleaned)
             if cached_notes:
                 return {
                     "success": True,
@@ -235,36 +286,54 @@ class SmartNotesGenerator:
         if chinese_trans:
             user_content += f"\nReference Translation: {chinese_trans}"
 
-        # 3. Try Cloud API (NVIDIA NIM)
+        # 3. Try Cloud API (NVIDIA NIM), with retry + circuit breaking.
+        # A single transient stall used to lose the whiteboard notes for that
+        # sentence permanently ("NVIDIA NIM smart notes generation failed:
+        # Request timed out." appeared in the live log with no second attempt).
         nv_client = self._get_nvidia_client()
         if nv_client:
-            try:
-                logger.info(f"Generating smart notes with NVIDIA NIM ({NVIDIA_MODEL}) for: {cleaned[:40]}...")
-                resp = await nv_client.chat.completions.create(
-                    model=NVIDIA_MODEL,
-                    messages=[
-                        {"role": "system", "content": SMART_NOTES_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_content}
-                    ],
-                    temperature=0.1,
-                    max_tokens=1600,
-                )
-                raw_out = (resp.choices[0].message.content or "").strip()
-                cleaned_out = clean_notes_markdown(raw_out)
-                has_all_sections = all(h in cleaned_out for h in ("### 🎯", "### 📚", "### 🧩"))
-                if cleaned_out and has_all_sections:
-                    self.save_cache(cleaned, cleaned_out, engine="nvidia")
-                    return {
-                        "success": True,
-                        "sentence": cleaned,
-                        "notes_markdown": cleaned_out,
-                        "cached": False,
-                        "engine": "nvidia"
-                    }
-                else:
-                    logger.warning(f"NVIDIA NIM output incomplete or missing sections: {cleaned_out[:100]}")
-            except Exception as exc:
-                logger.warning(f"NVIDIA NIM smart notes generation failed: {exc}")
+            metrics, breaker, limiter = self.nvidia_provider()
+
+            async def _call():
+                async with limiter():
+                    return await nv_client.chat.completions.create(
+                        model=NVIDIA_MODEL,
+                        messages=[
+                            {"role": "system", "content": SMART_NOTES_SYSTEM_PROMPT},
+                            {"role": "user", "content": user_content}
+                        ],
+                        temperature=0.1,
+                        max_tokens=1600,
+                    )
+
+            def _validate(resp) -> Optional[str]:
+                # A structurally incomplete board is worth another attempt;
+                # without this the local model would silently take over.
+                text = clean_notes_markdown((resp.choices[0].message.content or "").strip())
+                if not text:
+                    return "empty_output"
+                if not all(h in text for h in ("### 🎯", "### 📚", "### 🧩")):
+                    return "missing_required_sections"
+                return None
+
+            logger.info(f"Generating smart notes with NVIDIA NIM ({NVIDIA_MODEL}) for: {cleaned[:40]}...")
+            resp, failure = await self._retrier.run(
+                _call, provider="NVIDIA", metrics=metrics, breaker=breaker, validate=_validate
+            )
+            if resp is not None:
+                cleaned_out = clean_notes_markdown((resp.choices[0].message.content or "").strip())
+                await self._save_cache_off_loop(cleaned, cleaned_out, "nvidia")
+                return {
+                    "success": True,
+                    "sentence": cleaned,
+                    "notes_markdown": cleaned_out,
+                    "cached": False,
+                    "engine": "nvidia"
+                }
+            logger.warning(
+                "NVIDIA NIM smart notes unavailable (%s); falling back to the local model",
+                failure.reason if failure else "unknown",
+            )
 
         # 4. Fallback: Local LLM via RoutedClient
         logger.info(f"Falling back to local LLM for smart notes: {cleaned[:40]}...")
@@ -283,7 +352,7 @@ class SmartNotesGenerator:
             cleaned_out = clean_notes_markdown(raw_out)
             has_all_sections = all(h in cleaned_out for h in ("### 🎯", "### 📚", "### 🧩"))
             if cleaned_out and has_all_sections:
-                self.save_cache(cleaned, cleaned_out, engine="local")
+                await self._save_cache_off_loop(cleaned, cleaned_out, "local")
                 return {
                     "success": True,
                     "sentence": cleaned,
@@ -303,6 +372,90 @@ class SmartNotesGenerator:
             "cached": False,
             "engine": "failed",
             "error": "All notes generation engines failed"
+        }
+
+    # ------------------------------------------------------------------
+    # Background pre-generation
+    #
+    # NVIDIA NIM is free but slow: a full whiteboard measured 13-38s. Waiting for
+    # it interactively is the worst part of the experience, so notes for the
+    # upcoming sentences are generated ahead of time in the background. Because
+    # the API is free, warming a couple of sentences costs nothing but CPU time,
+    # and the learner then sees the board instantly.
+    # ------------------------------------------------------------------
+    def schedule_prefetch(self, sentences: List[str], *, ahead: Optional[int] = None) -> int:
+        """Queue background note generation for sentences not yet cached.
+
+        Returns how many were queued. Never raises and never blocks the request.
+        """
+        if not NVIDIA_PREFETCH_ENABLED or not NVIDIA_API_KEY:
+            return 0
+        if not isinstance(sentences, (list, tuple)):
+            return 0
+        limit = NVIDIA_PREFETCH_AHEAD if ahead is None else max(0, int(ahead))
+        if limit <= 0:
+            return 0
+
+        queued = 0
+        for raw in sentences:
+            if queued >= limit:
+                break
+            if not isinstance(raw, str):
+                continue
+            cleaned = raw.replace("\u00a0", " ").strip()
+            if not cleaned or len(cleaned) > 600:
+                continue
+            # Already have it (memory or SQLite) -> nothing to do.
+            if cleaned in self._memory_cache or self.get_cached(cleaned):
+                continue
+            if cleaned in self._prefetch_inflight:
+                continue
+            self._prefetch_inflight.add(cleaned)
+            task = asyncio.create_task(self._prefetch_one(cleaned))
+            self._prefetch_tasks.add(task)
+            task.add_done_callback(self._prefetch_tasks.discard)
+            queued += 1
+        return queued
+
+    async def _prefetch_one(self, sentence: str) -> None:
+        """Generate one whiteboard in the background, bounded by a semaphore."""
+        async with self._prefetch_semaphore:
+            try:
+                result = await self.generate_notes(sentence)
+                if result.get("success"):
+                    logger.info("Prefetched whiteboard notes for: %s...", sentence[:40])
+                else:
+                    logger.debug(
+                        "Prefetch produced no notes for %s (%s)",
+                        sentence[:40], result.get("error"),
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Prefetch failed for %s", sentence[:40], exc_info=True)
+            finally:
+                self._prefetch_inflight.discard(sentence)
+
+    async def cancel_prefetch(self) -> None:
+        """Cancel all outstanding pre-generation (called on shutdown)."""
+        tasks = list(self._prefetch_tasks)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._prefetch_tasks.clear()
+        self._prefetch_inflight.clear()
+
+    def prefetch_status(self) -> Dict[str, Any]:
+        return {
+            "enabled": bool(NVIDIA_PREFETCH_ENABLED and NVIDIA_API_KEY),
+            "ahead": NVIDIA_PREFETCH_AHEAD,
+            "concurrency": NVIDIA_PREFETCH_CONCURRENCY,
+            "in_flight": len(self._prefetch_inflight),
+            "queued": len(self._prefetch_tasks),
         }
 
 

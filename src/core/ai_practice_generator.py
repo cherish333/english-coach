@@ -16,6 +16,7 @@ import pymupdf
 from src.core.model_runtime import RoutedClient
 from src.core.web_importer import normalize_typography
 from src.core.translation import translation_service, is_valid_chinese_translation
+from src.core.json_utils import extract_json
 
 logger = logging.getLogger("english_coach.ai_practice")
 
@@ -162,7 +163,13 @@ You must output ONLY valid JSON matching this schema (no surrounding text, no co
 
 
 def clean_json_text(raw_text: str) -> str:
-    """Strip think blocks, markdown backticks, and isolate JSON string."""
+    """Strip think blocks, markdown backticks, and isolate the JSON payload.
+
+    Uses balanced scanning rather than a greedy ``\\{.*\\}`` match: trailing prose
+    that merely *contains* a brace (e.g. "(Note: {count} = 1 above.)") used to be
+    appended to the payload, which made otherwise-valid JSON unparseable and cost
+    a whole wasted model round trip.
+    """
     if not raw_text:
         return ""
     # Strip <think>...</think>
@@ -171,14 +178,10 @@ def clean_json_text(raw_text: str) -> str:
     # Match ```json ... ``` block
     m_json = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
     if m_json:
-        text = m_json.group(1).strip()
-    else:
-        # Match outermost curly braces
-        m_obj = re.search(r"\{[\s\S]*\}", text)
-        if m_obj:
-            text = m_obj.group(0).strip()
+        return m_json.group(1).strip()
 
-    return text
+    _, span = extract_json(text)
+    return span if span else text
 
 
 def parse_llm_practice_output(
@@ -294,10 +297,38 @@ def build_ai_practice_pdf(
     clean_title = sanitize_cjk_pdf_text(title) or "AI定制练习"
     clean_description = sanitize_cjk_pdf_text(description)
 
-    # Paginate sentences
+    # Paginate sentences by *measured* height.
+    # The old fixed `sentences_per_page=20` assumed every sentence was short: with
+    # realistic 14-20 word sentences only ~14 fit on page 1, and insert_textbox()
+    # renders nothing on overflow, so the remainder was silently dropped while
+    # still being reported in sentences_count. Pages are now filled to fit.
+    def _sentence_height(item: Dict[str, str], index: int) -> float:
+        text = sanitize_cjk_pdf_text(item.get("text", ""))
+        est_lines = max(1, len(f"{index}. {text}") // 80 + 1)
+        return est_lines * 14 + 4 + 8
+
     pages_data: List[List[Dict[str, str]]] = []
-    for i in range(0, len(sentences), sentences_per_page):
-        pages_data.append(sentences[i : i + sentences_per_page])
+    current_page: List[Dict[str, str]] = []
+    used_height = 0.0
+    # Page 1 carries the title banner and description, so it holds less.
+    first_page_budget = (height - margin_bottom) - (margin_top + 32 + 20 + 18)
+    later_page_budget = (height - margin_bottom) - (margin_top + 14 + 16)
+    budget = first_page_budget
+    per_page_cap = max(1, int(sentences_per_page or 20))
+    rendered_so_far = 0
+
+    for item in sentences:
+        needed = _sentence_height(item, rendered_so_far + len(current_page) + 1)
+        if current_page and (used_height + needed > budget or len(current_page) >= per_page_cap):
+            pages_data.append(current_page)
+            rendered_so_far += len(current_page)
+            current_page = []
+            used_height = 0.0
+            budget = later_page_budget
+        current_page.append(item)
+        used_height += needed
+    if current_page:
+        pages_data.append(current_page)
 
     if not pages_data:
         pages_data = [[]]
@@ -368,6 +399,30 @@ def build_ai_practice_pdf(
             s_trans = sanitize_cjk_pdf_text(item.get("translation", ""))
             s_focus = sanitize_cjk_pdf_text(item.get("focus", ""))
 
+            # Numbered English sentence — compact layout for high density
+            en_label = f"{global_idx}. {s_text}"
+            chars_per_line = 80  # ~80 chars at 10pt Helvetica on A4
+            est_en_lines = max(1, len(en_label) // chars_per_line + 1)
+            en_h = est_en_lines * 14 + 4
+
+            # A sentence that does not fit would be drawn as *nothing*; report the
+            # real rendered length instead of an estimate so the caller can see
+            # exactly what was placed.
+            en_rect = pymupdf.Rect(margin_x, y, width - margin_x, min(y + en_h, height - margin_bottom))
+            drawn = page.insert_textbox(
+                en_rect,
+                en_label,
+                fontname="helv",
+                fontsize=10,
+                color=(0.1, 0.14, 0.22),
+            )
+            if drawn < 0:
+                logger.warning(
+                    "Practice sentence %s did not fit its box and was skipped on page %s",
+                    global_idx, page_idx,
+                )
+                continue
+
             annotated_sentences.append({
                 "index": global_idx,
                 "page": page_idx,
@@ -375,20 +430,6 @@ def build_ai_practice_pdf(
                 "translation": s_trans,
                 "focus": s_focus,
             })
-
-            # Numbered English sentence — compact layout for high density
-            en_label = f"{global_idx}. {s_text}"
-            chars_per_line = 80  # ~80 chars at 10pt Helvetica on A4
-            est_en_lines = max(1, len(en_label) // chars_per_line + 1)
-            en_h = est_en_lines * 14 + 4
-            en_rect = pymupdf.Rect(margin_x, y, width - margin_x, y + en_h)
-            page.insert_textbox(
-                en_rect,
-                en_label,
-                fontname="helv",
-                fontsize=10,
-                color=(0.1, 0.14, 0.22),
-            )
             y += en_h + 8  # Compact spacing between practice sentences
             global_idx += 1
 

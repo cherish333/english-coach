@@ -23,6 +23,73 @@ from src.core.web_importer import normalize_typography, build_article_pdf
 
 logger = logging.getLogger("english_coach.youtube_importer")
 
+# Completed-download classification. yt-dlp leaves "{stem}.f<id>.mp4.part" and
+# ".ytdl" files behind on failure, and the "did we already download this?" glob
+# used to match those, so a half-written file could be installed as the lesson
+# video.
+_INCOMPLETE_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp")
+_INTERMEDIATE_RE = re.compile(r"\.f\d+\.", re.IGNORECASE)
+
+# Wall-clock budget for a media download. Long enough for a normal lecture clip,
+# short enough that a stalled transfer cannot hang the import request forever.
+MEDIA_DOWNLOAD_TIMEOUT = 1800.0
+# Refuse absurd downloads rather than filling the learner's disk.
+MAX_MEDIA_BYTES = 800 * 1024 * 1024
+
+
+def _is_complete_download(path: Path) -> bool:
+    name = path.name.lower()
+    if any(name.endswith(suffix) for suffix in _INCOMPLETE_SUFFIXES):
+        return False
+    if _INTERMEDIATE_RE.search(path.name):
+        return False
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _sweep_incomplete_downloads(directory: Path, stem: str) -> None:
+    """Remove leftover partial files for this download."""
+    for pattern in (f"{stem}.*.part", f"{stem}.*.ytdl", f"{stem}.*.temp", f"{stem}.part", f"{stem}.ytdl"):
+        for leftover in directory.glob(pattern):
+            try:
+                leftover.unlink()
+            except OSError:
+                logger.debug("Could not remove leftover %s", leftover, exc_info=True)
+
+
+async def _communicate_with_timeout(proc, timeout: float, label: str):
+    """Await a subprocess, guaranteeing the child dies on timeout or cancellation.
+
+    Every yt-dlp invocation previously used a bare ``await proc.communicate()``
+    with no timeout and no cleanup, so a stalled download hung the request
+    indefinitely and a cancelled request left yt-dlp running in the background.
+    """
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.CancelledError:
+        await _kill_process(proc, label)
+        raise
+    except asyncio.TimeoutError:
+        await _kill_process(proc, label)
+        raise TimeoutError(f"{label} 超时（{timeout:.0f} 秒），已终止。")
+
+
+async def _kill_process(proc, label: str) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return
+    except Exception:
+        logger.debug("Failed to kill %s", label, exc_info=True)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except Exception:
+        logger.debug("%s did not exit after kill", label, exc_info=True)
+
 DEFAULT_YTDLP_PATH = "/usr/bin/yt-dlp"
 
 YOUTUBE_URL_REGEX = re.compile(
@@ -1253,6 +1320,7 @@ async def fetch_youtube_metadata_and_subtitles(url: str) -> Tuple[str, List[Dict
             "--dump-single-json",
             "--no-playlist",
             "--no-warnings",
+            "--socket-timeout", "30",
             *build_ytdlp_extractor_args(strat.get("clients")),
             *build_ytdlp_auth_args(cookies_file=strat.get("cookies_file"), browser=strat.get("browser")),
             clean_url,
@@ -1264,7 +1332,7 @@ async def fetch_youtube_metadata_and_subtitles(url: str) -> Tuple[str, List[Dict
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
+            stdout, stderr = await _communicate_with_timeout(proc, 90.0, "yt-dlp metadata probe")
         except Exception as exc:
             raise ValueError(f"执行 yt-dlp 失败，请确认系统已正确安装: {exc}")
 
@@ -1381,7 +1449,7 @@ async def fetch_youtube_metadata_and_subtitles(url: str) -> Tuple[str, List[Dict
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    await proc.communicate()
+                    await _communicate_with_timeout(proc, 120.0, "yt-dlp subtitle download")
                     vtt_files = list(temp_dir.glob("*.vtt"))
                     if vtt_files:
                         content = vtt_files[0].read_text(encoding="utf-8", errors="replace")
@@ -1787,12 +1855,22 @@ async def download_youtube_media(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
+            _, stderr = await _communicate_with_timeout(proc, MEDIA_DOWNLOAD_TIMEOUT, "yt-dlp media download")
             if proc.returncode == 0:
-                candidates = list(dest_dir.glob(f"{output_stem}.*"))
+                # Only completed files. The glob also matches "{stem}.f398.mp4.part",
+                # and installing a half-written file as the lesson video produced a
+                # corrupt, unplayable document.
+                candidates = [c for c in dest_dir.glob(f"{output_stem}.*") if _is_complete_download(c)]
                 if candidates:
                     mp4_cands = [c for c in candidates if c.suffix.lower() == ".mp4"]
                     media_path = mp4_cands[0] if mp4_cands else candidates[0]
+                    if media_path.stat().st_size > MAX_MEDIA_BYTES:
+                        logger.warning(
+                            "Downloaded media is %s bytes, above the %s byte cap; discarding",
+                            media_path.stat().st_size, MAX_MEDIA_BYTES,
+                        )
+                        _sweep_incomplete_downloads(dest_dir, output_stem)
+                        return None
                     logger.info(f"Successfully downloaded YouTube video: {media_path} ({media_path.stat().st_size} bytes)")
                     return media_path
             else:
@@ -1821,11 +1899,15 @@ async def download_youtube_media(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
+            _, stderr = await _communicate_with_timeout(proc, MEDIA_DOWNLOAD_TIMEOUT, "yt-dlp media download")
             if proc.returncode == 0:
-                candidates = list(dest_dir.glob(f"{output_stem}.*"))
+                candidates = [c for c in dest_dir.glob(f"{output_stem}.*") if _is_complete_download(c)]
                 if candidates:
                     media_path = candidates[0]
+                    if media_path.stat().st_size > MAX_MEDIA_BYTES:
+                        logger.warning("Audio fallback above the size cap; discarding")
+                        _sweep_incomplete_downloads(dest_dir, output_stem)
+                        return None
                     logger.info(f"Successfully downloaded YouTube audio fallback: {media_path}")
                     return media_path
         except Exception as exc:

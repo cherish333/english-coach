@@ -76,3 +76,23 @@ DEEPL_API_URL = os.getenv(
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct").strip()
+
+# Dedicated NVIDIA translation model. Measured on real calls: 0.6-1.9s for a
+# sentence, versus 8-17s for the general instruct model, because it is a 4B
+# translation-specialised model rather than a general reasoner. Used for the fast
+# lane (word glosses) and as the NVIDIA-side sentence translator; DeepL remains
+# the first choice for sentences because its phrasing measured more natural.
+NVIDIA_TRANSLATE_MODEL = os.getenv(
+    "NVIDIA_TRANSLATE_MODEL", "nvidia/riva-translate-4b-instruct-v2"
+).strip()
+# Set to false to force every NVIDIA call through the general model.
+NVIDIA_USE_TRANSLATE_MODEL = os.getenv(
+    "NVIDIA_USE_TRANSLATE_MODEL", "true"
+).strip().lower() in ("true", "1", "yes")
+
+# Background whiteboard pre-generation. NVIDIA NIM is free but slow (measured
+# 13-38s for a full board), so notes for upcoming sentences are generated ahead
+# of time; the learner then sees them instantly when they navigate.
+NVIDIA_PREFETCH_ENABLED = os.getenv("NVIDIA_PREFETCH_ENABLED", "true").strip().lower() in ("true", "1", "yes")
+NVIDIA_PREFETCH_AHEAD = int(os.getenv("NVIDIA_PREFETCH_AHEAD", "2"))
+NVIDIA_PREFETCH_CONCURRENCY = int(os.getenv("NVIDIA_PREFETCH_CONCURRENCY", "2"))

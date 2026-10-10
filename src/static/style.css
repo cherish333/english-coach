@@ -93,7 +93,8 @@ body {
   margin: 0;
   background: var(--canvas);
   color: var(--ink);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+               var(--font-cjk), sans-serif;
   transition: background-color 0.2s ease, color 0.2s ease;
 }
 
@@ -271,9 +272,13 @@ input[type="range"] { accent-color: var(--blue); width: 95px; cursor: pointer; }
   position: relative;
 }
 
-/* Column Width Limits */
+/* Column Width Limits
+   These were fixed at 320px / 360px regardless of display size, so on a 3840px
+   screen both side panels stayed phone-sized while the center column absorbed
+   3120px. The defaults now scale with the viewport inside the same usable range;
+   an explicit user drag (--col-left-w / --col-right-w) still wins. */
 .col-panel.col-left {
-  width: var(--col-left-w, 320px);
+  width: var(--col-left-w, clamp(300px, 17vw, 480px));
   flex: 0 0 auto;
   min-width: 240px;
   max-width: 650px;
@@ -285,7 +290,7 @@ input[type="range"] { accent-color: var(--blue); width: 95px; cursor: pointer; }
 }
 
 .col-panel.col-right {
-  width: var(--col-right-w, 360px);
+  width: var(--col-right-w, clamp(300px, 15vw, 520px));
   flex: 0 0 auto;
   min-width: 260px;
   max-width: 850px;
@@ -2044,7 +2049,10 @@ body.is-resizing-v {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  /* Must sit above the immersive fullscreen layers (99998/99999); otherwise
+     every modal opened from fullscreen mode -- e.g. AI 出题, the odometer --
+     silently renders underneath the opaque fullscreen card. */
+  z-index: 100000;
 }
 .modal-dialog {
   width: min(90vw, 760px);
@@ -2140,7 +2148,9 @@ body.is-resizing-v {
   border-radius: 999px;
   font-size: 12px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35);
-  z-index: 2000;
+  /* Above the immersive fullscreen layers, so feedback raised from fullscreen
+     mode is actually visible. */
+  z-index: 100001;
   animation: fadeIn 0.2s ease-out;
 }
 @keyframes fadeIn {
@@ -3106,9 +3116,13 @@ body.typing-fullscreen-active::before {
 
 /* Fullscreen: Bottom Toolbar & Steppers */
 .sentence-focus-card.fullscreen-mode .typing-hint-bar {
-  padding: 10px 4px 2px 4px;
+  padding: 8px 4px 2px 4px;
   font-size: 15px;
-  gap: 16px;
+  /* Tight enough that progress + nav + the 12-control toolbar stay on ONE line
+     at 1920px; wrapping the toolbar looked worse than the density saved. */
+  gap: 12px;
+  flex-wrap: nowrap;
+  align-items: center;
 }
 
 .sentence-focus-card.fullscreen-mode #typing-progress-text {
@@ -3117,19 +3131,66 @@ body.typing-fullscreen-active::before {
 }
 
 .sentence-focus-card.fullscreen-mode .typing-actions-group {
-  gap: 6px;
+  gap: 5px;
+  flex-wrap: nowrap;
 }
 
-.sentence-focus-card.fullscreen-mode .typing-actions-group .mini-icon-btn {
+/* Fullscreen has no room to spare: the cluster separators are informative at
+   the denser normal size but here their extra margin pushed the row onto a
+   second line. Drop them rather than shrink the touch targets. */
+.sentence-focus-card.fullscreen-mode .typing-actions-group > :nth-child(3),
+.sentence-focus-card.fullscreen-mode .typing-actions-group > :nth-child(7),
+.sentence-focus-card.fullscreen-mode .typing-actions-group > :nth-child(10) {
+  margin-right: 0;
+  background-image: none;
+}
+
+/* Square 44px icon buttons for the fullscreen toolbar.
+   Labelled buttons must be EXCLUDED: this rule forced `width: 44px` onto
+   `.practice-mode-btn` ("📖 对照跟打"), so its label spilled ~46px outside its
+   own box and visually collided with the neighbouring button. Content-sized
+   buttons keep their own width at fullscreen scale. */
+.sentence-focus-card.fullscreen-mode .typing-actions-group .mini-icon-btn:not(.practice-mode-btn):not(.repeat-mode-btn) {
   width: 44px;
   height: 44px;
   font-size: 18px;
   border-radius: 9px;
 }
 
+/* Fullscreen: the mode button collapses to its icon.
+   The full label needs ~105px but only ~59px remains beside the eleven 44px
+   icon buttons, and the resulting overflow pushed the toolbar onto a second
+   row. The emoji already identifies the mode (📖/🧩/🧠/🎧) and the tooltip plus
+   the Alt+M shortcut carry the name, so the label is hidden rather than the
+   touch targets being shrunk. */
+.sentence-focus-card.fullscreen-mode .practice-mode-btn {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  font-size: 20px;
+  border-radius: 9px;
+}
+.sentence-focus-card.fullscreen-mode .practice-mode-btn #typing-mode-label {
+  display: none;
+}
+
+.sentence-focus-card.fullscreen-mode .repeat-mode-btn {
+  width: auto;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 10px;
+  border-radius: 9px;
+}
+
 .sentence-focus-card.fullscreen-mode .repeat-mode-btn span {
   font-size: 15px;
   font-weight: 800;
+}
+
+.sentence-focus-card.fullscreen-mode .auto-typing-toggle-label {
+  font-size: 14px;
+  gap: 6px;
 }
 
 .sentence-focus-card.fullscreen-mode .typing-nav-group .nav-mini-btn {
@@ -3925,3 +3986,434 @@ body.typing-fullscreen-active::before {
   display: none !important;
 }
 
+
+/* ==========================================================================
+   Practice modes (cloze / recall / dictation) and spaced repetition panel
+   ========================================================================== */
+
+/* Masked characters must not reveal the answer, but must stay legible enough to
+   show word length and rhythm. */
+#typing-target-display .char-hidden {
+  color: rgba(148, 163, 184, 0.55);
+  font-weight: 400;
+}
+
+#typing-target-display .char-current-masked {
+  border-bottom: 2px solid var(--blue, #3b82f6);
+  animation: caretPulse 1s ease-in-out infinite;
+}
+
+@keyframes caretPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.practice-mode-btn {
+  font-size: 11px;
+  letter-spacing: 0.2px;
+  /* The mode button carries a text label, so it must size to its content.
+     Without this it inherited the 32px icon width and the label wrapped onto
+     three lines (scrollHeight 78px inside a 32px box), which stretched the
+     toolbar to 79px and made it spill out of its 32px container. */
+  width: auto;
+  min-width: 32px;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+
+/* The hint bar has no fixed width budget, so allow wrapping rather than
+   clipping the rightmost controls when the label grows or the column narrows. */
+.typing-hint-bar {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.typing-actions-group {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 4px;
+}
+
+#typing-translation-display {
+  transition: opacity 0.15s ease;
+}
+
+.review-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.review-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 8px;
+  border: 1px solid var(--line, rgba(148, 163, 184, 0.25));
+  border-radius: 10px;
+  background: var(--surface-muted, rgba(148, 163, 184, 0.08));
+}
+
+.review-stat-val {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--ink, #e2e8f0);
+}
+
+.review-stat-label {
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
+}
+
+.review-item-state {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.review-item-state.state-new { background: rgba(59, 130, 246, 0.18); color: #60a5fa; }
+.review-item-state.state-learning { background: rgba(245, 158, 11, 0.18); color: #fbbf24; }
+.review-item-state.state-review { background: rgba(34, 197, 94, 0.18); color: #4ade80; }
+.review-item-state.state-relearn { background: rgba(239, 68, 68, 0.18); color: #f87171; }
+
+.review-forecast-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 64px;
+  margin-top: 8px;
+}
+
+.review-forecast-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.review-forecast-fill {
+  width: 100%;
+  background: linear-gradient(180deg, #60a5fa, #3b82f6);
+  border-radius: 3px 3px 0 0;
+  min-height: 2px;
+}
+
+.review-forecast-label {
+  font-size: 9px;
+  color: var(--muted, #94a3b8);
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Fullscreen immersive layout — use the HORIZONTAL space
+   --------------------------------------------------------------------------
+   A landscape monitor is height-constrained and width-rich, but fullscreen mode
+   stacked every block vertically: measured need was 891px of content in a 993px
+   viewport at 1920x1080 (and 1248px in 1353px at 2560x1440), so the card always
+   scrolled and the typing area was squeezed to ~518px. Splitting the reference
+   material into a left column lets the typing surface take the full height.
+   ========================================================================== */
+@media (min-width: 1100px) {
+  .sentence-focus-card.fullscreen-mode {
+    display: grid !important;
+    grid-template-columns: minmax(360px, 34%) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas:
+      "fshead fshead"
+      "fsleft fsmain";
+    gap: 18px 26px !important;
+    overflow: hidden !important;
+    /* Override the narrow-screen flex layout it would otherwise inherit. */
+    flex-direction: row !important;
+  }
+
+  .sentence-focus-card.fullscreen-mode .sentence-fs-header {
+    grid-area: fshead;
+  }
+
+  /* Left column wrapper created by ensureFullscreenColumns() */
+  .sentence-focus-card.fullscreen-mode .fs-left-col {
+    grid-area: fsleft;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .sentence-focus-card.fullscreen-mode .shadow-typing-card {
+    grid-area: fsmain;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  /* The sentence and its translation live side by side with the typing area,
+     so neither needs a hard max-height any more. */
+  .sentence-focus-card.fullscreen-mode .sentence-preview-box {
+    max-height: none;
+    flex: 0 0 auto;
+  }
+
+  .sentence-focus-card.fullscreen-mode .typing-translation-display {
+    flex: 0 0 auto;
+  }
+
+  .sentence-focus-card.fullscreen-mode .typing-target-display {
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  /* Video (if the lesson has one) stays in the left column rather than pushing
+     the typing area down. */
+  .sentence-focus-card.fullscreen-mode .video-player-container {
+    grid-area: auto;
+    flex: 0 0 auto;
+  }
+}
+
+/* Short viewports (laptops, 16:9) must not force a scrollbar while typing:
+   the typing surface keeps priority over the reference blocks. */
+@media (min-width: 1100px) and (max-height: 1000px) {
+  .sentence-focus-card.fullscreen-mode .sentence-preview-box {
+    font-size: 26px;
+    padding: 16px 20px;
+  }
+  .sentence-focus-card.fullscreen-mode .sentence-preview-box .sentence-text-val {
+    font-size: 26px;
+  }
+  .sentence-focus-card.fullscreen-mode .typing-translation-display,
+  .sentence-focus-card.fullscreen-mode .typing-translation-display .translation-text {
+    font-size: 20px;
+    padding: 10px 18px;
+  }
+  .sentence-focus-card.fullscreen-mode .typing-target-display {
+    font-size: 30px;
+    line-height: 1.9;
+    padding: 18px 24px;
+  }
+  .sentence-focus-card.fullscreen-mode .shadow-typing-card {
+    min-height: 240px;
+    padding: 16px 20px;
+    gap: 10px;
+  }
+}
+
+/* ==========================================================================
+   CJK typography — font stack and line-height, NOT font-size scaling
+   --------------------------------------------------------------------------
+   `<html lang="zh-CN">` means Chinese labels resolve through the body font stack.
+   Two real problems were measured:
+
+   1. The stack listed "Microsoft YaHei" at the *end* behind generic keywords, so
+      Latin-first faces won the match and CJK text rendered in an unintended
+      fallback. A dedicated CJK stack fixes the mixing.
+   2. CJK glyphs are drawn on a full em square, so at equal px they read larger
+      and looser than Latin. Scaling them with `font-size: 0.94em` was tried and
+      rejected: `em` compounds through nesting (a 13px title measured 8.6px), so
+      the correction is applied to line-height only — which is where the extra
+      visual weight actually comes from — and never to nested font sizes.
+   ========================================================================== */
+:root {
+  --font-cjk: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+              "Source Han Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
+}
+
+/* Tighter leading for CJK UI chrome: full-em glyphs need less leading than the
+   1.5-1.6 tuned for Latin text. */
+:lang(zh) button,
+:lang(zh) label,
+:lang(zh) select,
+:lang(zh) input,
+:lang(zh) .btn,
+:lang(zh) .icon-btn,
+:lang(zh) .mini-icon-btn,
+:lang(zh) .nav-mini-btn,
+:lang(zh) .radio-chip,
+:lang(zh) .game-tab-btn,
+:lang(zh) .p-panel-tab-btn,
+:lang(zh) .layout-preset-card,
+:lang(zh) .menu-setting-label,
+:lang(zh) .whiteboard-actions button,
+:lang(zh) h1,
+:lang(zh) h2,
+:lang(zh) h3 {
+  line-height: 1.35;
+}
+
+:lang(zh) p,
+:lang(zh) li,
+:lang(zh) .empty-state p {
+  line-height: 1.6;
+}
+
+/* English learning content must never be optically shrunk: it is the material
+   the learner is actually reading and typing. Marked lang="en" in the markup. */
+:lang(en),
+.typing-target-display,
+.sentence-text-val,
+.whiteboard-content,
+.focus-sentence-text {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.55;
+}
+
+:lang(en) pre,
+:lang(en) code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* ==========================================================================
+   Toolbar information hierarchy
+   --------------------------------------------------------------------------
+   The typing toolbar exposed 12 icon buttons plus a label in one undifferentiated
+   row: playback, pronunciation toggles, practice settings, editing and view
+   controls all looked equally important. Grouping them with quiet separators and
+   de-emphasising the toggles makes the row scannable without removing anything.
+   ========================================================================== */
+.typing-actions-group {
+  align-items: center;
+  column-gap: 4px;
+}
+
+/* Cluster boundaries: a hairline drawn INSIDE the gap, so it never consumes
+   layout width. An earlier version used `margin-right` + an absolutely
+   positioned ::after, which added ~6px per separator to the toolbar's scroll
+   width and pushed the whole row onto a second line inside fullscreen mode.
+   `:nth-child` keeps the markup untouched. Verified child order is
+     1 mode | 2 reveal | 3 repeat || 4 word-audio | 5 word-trans | 6 key-sound
+     7 translation || 8 original-media | 9 replay | 10 loop || 11 clear
+     12 fullscreen | 13 auto-focus
+   so the hairlines fall after repeat (3), translation (7) and loop (10). */
+.typing-actions-group > :nth-child(3),
+.typing-actions-group > :nth-child(7),
+.typing-actions-group > :nth-child(10) {
+  margin-right: 11px;
+  background-image: linear-gradient(var(--line), var(--line));
+  background-repeat: no-repeat;
+  background-size: 1px 60%;
+  background-position: right -6px center;
+  background-clip: border-box;
+}
+
+/* Audio/feedback toggles read as secondary: they are set once and forgotten. */
+#typing-word-sound-btn,
+#typing-word-trans-btn,
+#typing-sound-btn,
+#typing-trans-toggle-btn,
+.auto-typing-toggle-label {
+  opacity: 0.72;
+}
+#typing-word-sound-btn.active,
+#typing-word-trans-btn.active,
+#typing-sound-btn.active,
+#typing-trans-toggle-btn.active {
+  opacity: 1;
+}
+
+/* Destructive / view actions sit apart from the practice controls. */
+#typing-clear-btn,
+#typing-fullscreen-btn {
+  color: var(--muted);
+}
+#typing-fullscreen-btn {
+  margin-left: 3px;
+}
+
+/* Disabled reveal button keeps its slot so the row never reflows when the
+   practice mode changes. */
+#typing-reveal-btn[style*="display: none"] {
+  display: none !important;
+}
+
+.auto-typing-toggle-label {
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  margin-left: 2px;
+}
+
+/* ==========================================================================
+   Header density
+   --------------------------------------------------------------------------
+   The header carries model control, three progress meters, the HUD and the
+   settings popover: 17 interactive controls in 56px, all at equal visual weight,
+   which is why it reads as crowded. These rules reduce its footprint without
+   removing a single capability.
+   ========================================================================== */
+.app-header {
+  column-gap: 10px;
+}
+
+/* The model status line is informational most of the time; let it truncate
+   rather than squeeze the progress meters. */
+#local-model-status {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Progress meters are read at a glance, so the numbers carry the emphasis and
+   the labels recede. */
+.header-progress-item .progress-label {
+  opacity: 0.75;
+  letter-spacing: 0.02em;
+}
+
+/* Keep the header on one line down to narrower windows, then let it breathe. */
+@media (max-width: 1500px) {
+  #local-model-status {
+    max-width: 150px;
+  }
+  .app-header {
+    column-gap: 7px;
+  }
+}
+
+@media (max-width: 1180px) {
+  #local-model-status {
+    max-width: 110px;
+  }
+  .header-progress-item {
+    display: none;
+  }
+  .header-progress-item:first-child {
+    display: flex;
+  }
+}
+
+/* ==========================================================================
+   Cloud whiteboard progress indicator
+   --------------------------------------------------------------------------
+   NVIDIA NIM measured 10-35s (median ~21s) for a full whiteboard, so a static
+   "生成中…" reads as a frozen UI. A determinate-looking progress track plus a
+   live elapsed counter makes a 20s wait legible as progress.
+   ========================================================================== */
+.notes-progress-track {
+  width: min(260px, 100%);
+  height: 4px;
+  margin: 12px auto 0;
+  border-radius: 999px;
+  background: var(--line, rgba(148, 163, 184, 0.25));
+  overflow: hidden;
+}
+
+.notes-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #38bdf8, #6366f1);
+  transition: width 0.5s ease-out;
+}

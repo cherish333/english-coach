@@ -4,6 +4,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import threading
@@ -12,6 +13,8 @@ import shutil
 
 import pymupdf
 from src.config import VOCABULARY_PDF, GRAMMAR_PDF, WESTERN_CIV_PDF, CUSTOM_BOOKS_DIR, MEDIA_DIR
+
+logger = logging.getLogger("english_coach.documents")
 
 
 @dataclass(frozen=True)
@@ -77,20 +80,41 @@ class DocumentLibrary:
         self._load_custom_documents()
 
     def _get_page_cursor(self, document_id: str, page_number: int) -> int:
+        """Return the sentence-index cursor at which `page_number` starts.
+
+        This must resolve the preceding pages *once*, in a single forward pass.
+        An earlier version called get_page_sentences() for every unresolved
+        earlier page, and that call re-enters this method, so the work doubled
+        per level: page 20 cost 1024 page parses (~10s), page 24 cost 4096
+        (~40s), and page 30 would have taken minutes. Because the whole document
+        API shares one single-worker executor, that froze every document
+        endpoint. Pages that legitimately record no cursor are now marked as
+        resolved at 0 so they are never recomputed.
+        """
         if page_number <= 1:
             return 0
-        cursors = self._doc_page_cursors.get(document_id, {})
-        if page_number in cursors:
-            return cursors[page_number]
-        # Resolve preceding pages sequentially to populate page cursor chain
+        with self._lock:
+            cursors = self._doc_page_cursors.setdefault(document_id, {})
+            if page_number in cursors:
+                return cursors[page_number]
+
+        # Single forward pass over the earlier pages.
         for p in range(1, page_number):
-            if p not in cursors:
-                try:
-                    self.get_page_sentences(document_id, p)
-                except Exception:
-                    pass
-            cursors = self._doc_page_cursors.get(document_id, {})
-        return cursors.get(page_number, 0)
+            with self._lock:
+                if p in self._doc_page_cursors.get(document_id, {}):
+                    continue
+            try:
+                self.get_page_sentences(document_id, p)
+            except Exception:
+                logger.debug("Failed to resolve page cursor for %s p%s", document_id, p, exc_info=True)
+            finally:
+                # Mark resolved even when nothing was recorded, otherwise every
+                # later page re-parses this one.
+                with self._lock:
+                    self._doc_page_cursors.setdefault(document_id, {}).setdefault(p, 0)
+
+        with self._lock:
+            return self._doc_page_cursors.get(document_id, {}).get(page_number, 0)
 
     def _record_page_cursor(self, document_id: str, next_page: int, cursor: int):
         with self._lock:
@@ -123,10 +147,13 @@ class DocumentLibrary:
             unit_count = entry.get("unit_count", 0)
             if not title or not unit_count:
                 try:
+                    # try/finally so a metadata/len() failure cannot leak the handle.
                     doc = pymupdf.open(str(pdf_path))
-                    title = title or doc.metadata.get("title") or pdf_path.stem
-                    unit_count = unit_count or len(doc)
-                    doc.close()
+                    try:
+                        title = title or doc.metadata.get("title") or pdf_path.stem
+                        unit_count = unit_count or len(doc)
+                    finally:
+                        doc.close()
                 except Exception:
                     title = title or pdf_path.stem
                     unit_count = unit_count or 1
@@ -192,10 +219,14 @@ class DocumentLibrary:
         target_path.write_bytes(content)
 
         try:
+            # try/finally: on a malformed PDF the exception path used to leave the
+            # handle open while the file was unlinked underneath it.
             doc = pymupdf.open(str(target_path))
-            pages = len(doc)
-            detected_title = doc.metadata.get("title") if doc.metadata else ""
-            doc.close()
+            try:
+                pages = len(doc)
+                detected_title = doc.metadata.get("title") if doc.metadata else ""
+            finally:
+                doc.close()
         except Exception as e:
             if target_path.exists():
                 target_path.unlink()
@@ -345,17 +376,29 @@ class DocumentLibrary:
                     sent_file.unlink()
                 except Exception:
                     pass
-            # Delete media files
+            # Delete media files.
+            # media_filename comes from catalog.json, so it must be resolved and
+            # containment-checked exactly like the media endpoint does; otherwise
+            # a tampered catalog turns "delete document" into arbitrary file
+            # deletion (e.g. "../../.ssh/id_rsa").
+            media_root = MEDIA_DIR.resolve()
             if getattr(spec, "media_filename", None):
-                mf = MEDIA_DIR / spec.media_filename
-                if mf.exists():
+                try:
+                    mf = (MEDIA_DIR / spec.media_filename).resolve()
+                except (OSError, ValueError):
+                    mf = None
+                if mf is not None and mf.is_relative_to(media_root) and mf.is_file():
                     try:
                         mf.unlink()
                     except Exception:
-                        pass
+                        logger.warning("Failed to remove media file %s", mf, exc_info=True)
+                elif mf is not None:
+                    logger.warning("Refusing to delete media outside the media dir: %s", mf)
             for m in MEDIA_DIR.glob(f"{document_id}.*"):
                 try:
-                    m.unlink()
+                    resolved = m.resolve()
+                    if resolved.is_relative_to(media_root) and resolved.is_file():
+                        resolved.unlink()
                 except Exception:
                     pass
             catalog_file = CUSTOM_BOOKS_DIR / "catalog.json"
@@ -570,7 +613,10 @@ class DocumentLibrary:
                 sidebars = []
                 for b in right_blocks:
                     t = b[4].strip()
-                    if re.match(r"^(CHRONOLOGY|TABLE|NOTE:)\b", t, re.IGNORECASE) or (sidebars and b[1] < 150):
+                    # `\b` after "NOTE:" can never match (there is no word
+                    # boundary between ":" and a space), so NOTE: sidebars were
+                    # silently treated as narrative. Use an explicit separator.
+                    if re.match(r"^(CHRONOLOGY|TABLE|NOTE:)(?:\s|$)", t, re.IGNORECASE) or (sidebars and b[1] < 150):
                         sidebars.append(b)
                     else:
                         right_narrative.append(b)
@@ -777,7 +823,11 @@ class DocumentLibrary:
                 t = re.sub(r"^[•\-\*▪]\s*", "", t)
                 t = re.sub(r"^\d+(?:\.\d+)*[.)]\s+", "", t).strip()
                 t = re.sub(r"\s+", " ", t)
-                if len(t) < 4 or not re.search(r"[a-zA-Z]", t):
+                # The splitter is explicitly CJK-aware (it breaks on 。！？ and
+                # before \u4e00-\u9fff), and CJK PDFs are supported on upload, so
+                # requiring a Latin letter silently deleted every Chinese sentence
+                # from both the sentence list and the page text sent to the LLM.
+                if len(t) < 4 or not re.search(r"[a-zA-Z\u4e00-\u9fff]", t):
                     return
                 final_sentences.append({
                     "index": idx,

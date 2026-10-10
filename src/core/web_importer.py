@@ -5,6 +5,7 @@ structured, paginated PDF documents for the textbook/sentence player.
 
 import html
 import ipaddress
+import logging
 from pathlib import Path
 import re
 import socket
@@ -14,13 +15,41 @@ from urllib.parse import urlparse
 import httpx
 import pymupdf
 
+logger = logging.getLogger("english_coach.web_importer")
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/130.0.0.0 Safari/537.36 EnglishCoach/1.0"
 )
 
+# Cap on how much of a remote page is buffered before extracting text.
+MAX_WEB_BODY_BYTES = 5 * 1024 * 1024
+
 _SHARED_CARRIER_NAT = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _slice_balanced_div(document: str, start: int) -> str:
+    """Return the inner HTML of the <div> whose content starts at ``start``.
+
+    Non-greedy ``(.*?)</div>`` stops at the first nested closing tag and so
+    returns only the container's first child. This walks the tag stream keeping
+    a depth counter instead, ignoring self-closing tags.
+    """
+    depth = 1
+    pos = start
+    for match in re.finditer(r"<(/?)div\b[^>]*?(/?)>", document[start:], re.IGNORECASE):
+        is_closing = bool(match.group(1))
+        is_self_closing = bool(match.group(2))
+        if is_self_closing:
+            continue
+        if is_closing:
+            depth -= 1
+            if depth == 0:
+                return document[start:start + match.start()]
+        else:
+            depth += 1
+        pos = start + match.end()
+    return document[start:pos] if pos > start else ""
 
 
 def normalize_typography(text: str) -> str:
@@ -76,16 +105,20 @@ def is_ssrf_blocked_host(hostname: str) -> bool:
 
     try:
         infos = socket.getaddrinfo(hostname, None)
-        for _, _, _, _, sockaddr in infos:
-            ip_str = sockaddr[0]
-            try:
-                ip = ipaddress.ip_address(ip_str)
-                if _is_prohibited_ip(ip):
-                    return True
-            except ValueError:
-                pass
     except Exception:
-        pass
+        # Resolution failure must NOT be treated as "safe". httpx resolves the
+        # name again when connecting, so failing open here let a host that
+        # refuses our lookup still be dialled.
+        return True
+
+    for _, _, _, _, sockaddr in infos:
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            if _is_prohibited_ip(ip):
+                return True
+        except ValueError:
+            pass
 
     return False
 
@@ -125,10 +158,33 @@ async def fetch_web_page(url: str, timeout: float = 15.0) -> str:
             follow_redirects=True,
             event_hooks={"response": [check_redirect]}
         ) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code >= 400:
-                raise ValueError(f"无法访问该网页，服务器返回 HTTP 状态码: {resp.status_code}")
-            return resp.text
+            # Streamed so a huge or binary response cannot be buffered whole into
+            # the API process (which previously could hang or OOM the worker).
+            async with client.stream("GET", url, headers=headers) as resp:
+                if resp.status_code >= 400:
+                    raise ValueError(f"无法访问该网页，服务器返回 HTTP 状态码: {resp.status_code}")
+
+                content_type = (resp.headers.get("content-type") or "").lower()
+                if content_type and not any(
+                    accepted in content_type
+                    for accepted in ("text/html", "application/xhtml", "text/plain", "application/xml", "text/xml")
+                ):
+                    raise ValueError(f"该网址返回的不是网页内容 (Content-Type: {content_type.split(';')[0]})，无法作为文章导入。")
+
+                chunks = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_WEB_BODY_BYTES:
+                        raise ValueError(
+                            f"网页内容过大（超过 {MAX_WEB_BODY_BYTES // (1024 * 1024)}MB），请改用“粘贴正文”方式导入。"
+                        )
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+
+        return body.decode(resp.encoding or "utf-8", errors="replace")
+    except ValueError:
+        raise
     except httpx.RequestError as exc:
         raise ValueError(f"网络连接失败，请检查网址或网络环境: {exc}")
 
@@ -147,12 +203,12 @@ def clean_html_article(raw_html: str, fallback_url: str = "") -> tuple[str, list
     # 2. Extract title
     title = ""
     og_title = re.search(
-        r"<meta\s+property=[\"']og:title[\"']\s+content=[\"'](.*?)[\"']",
+        r"<meta\s+property=[\"']og:title[\"']\s+content=([\"'])(.*?)\1",
         raw_html,
-        re.IGNORECASE,
+        re.IGNORECASE | re.DOTALL,
     )
     if og_title:
-        title = html.unescape(og_title.group(1)).strip()
+        title = html.unescape(og_title.group(2)).strip()
 
     if not title:
         title_m = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
@@ -171,13 +227,15 @@ def clean_html_article(raw_html: str, fallback_url: str = "") -> tuple[str, list
         title = parsed.path.strip("/").split("/")[-1] or parsed.netloc or "Imported Web Article"
         title = title.replace("-", " ").replace("_", " ").title()
 
-    # 3. Locate main article container if semantic tags exist
+    # 3. Locate main article container if semantic tags exist.
+    #    <article>/<main> are paired tags so a non-greedy match is safe, but a
+    #    <div> container must be sliced by depth: `(.*?)</div>` stops at the
+    #    first *nested* closing tag, which silently truncated a typical
+    #    WordPress page to its first child block.
     content = ""
     for pattern in [
         r"<article[^>]*>(.*?)</article>",
         r"<main[^>]*>(.*?)</main>",
-        r"<div[^>]+class=[\"'][^\"']*(?:article|post-content|entry-content|manual__content|story-body|main-content)[^\"']*[\"'][^>]*>(.*?)</div>",
-        r"<div[^>]+id=[\"'][^\"']*(?:article|post-content|entry-content|main-content)[^\"']*[\"'][^>]*>(.*?)</div>",
     ]:
         m = re.search(pattern, cleaned_html, re.IGNORECASE | re.DOTALL)
         if m:
@@ -185,7 +243,30 @@ def clean_html_article(raw_html: str, fallback_url: str = "") -> tuple[str, list
             break
 
     if not content:
+        for pattern in [
+            r"<div[^>]+class=[\"'][^\"']*(?:article|post-content|entry-content|manual__content|story-body|main-content)[^\"']*[\"'][^>]*>",
+            r"<div[^>]+id=[\"'][^\"']*(?:article|post-content|entry-content|main-content)[^\"']*[\"'][^>]*>",
+        ]:
+            m = re.search(pattern, cleaned_html, re.IGNORECASE | re.DOTALL)
+            if m:
+                content = _slice_balanced_div(cleaned_html, m.end())
+                if content:
+                    break
+
+    if not content:
         content = cleaned_html
+
+    # Guard: if the chosen container contains far less readable text than the
+    # whole document, the container heuristic was wrong — prefer the full page.
+    if content is not cleaned_html:
+        container_words = len(re.sub(r"<[^>]+>", " ", content).split())
+        page_words = len(re.sub(r"<[^>]+>", " ", cleaned_html).split())
+        if page_words > 40 and container_words < page_words * 0.4:
+            logger.info(
+                "Article container held %s words of %s on the page; using the full document instead",
+                container_words, page_words,
+            )
+            content = cleaned_html
 
     # 4. Extract paragraphs and headings
     raw_blocks = re.findall(
@@ -264,13 +345,59 @@ def sanitize_cjk_pdf_text(text: str) -> str:
     return text.strip()
 
 
+def _split_oversized_paragraph(text: str, max_chars: int = 480) -> list[str]:
+    """Split a paragraph that is too tall to fit on one page.
+
+    PyMuPDF's insert_textbox renders *nothing* when the text does not fit the
+    rectangle, so an over-long paragraph used to vanish silently. Splitting at
+    sentence boundaries keeps every word in the document.
+    """
+    if len(text) <= max_chars:
+        return [text]
+    sentences = re.split(r"(?<=[.!?。！？])\s+", text)
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if not sentence:
+            continue
+        if current and len(current) + len(sentence) + 1 > max_chars:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}".strip()
+    if current:
+        chunks.append(current)
+    # A single sentence longer than max_chars still has to fit: hard-wrap it.
+    output: list[str] = []
+    for chunk in chunks:
+        while len(chunk) > max_chars:
+            cut = chunk.rfind(" ", 0, max_chars)
+            if cut <= 0:
+                cut = max_chars
+            output.append(chunk[:cut].strip())
+            chunk = chunk[cut:].strip()
+        if chunk:
+            output.append(chunk)
+    return output
+
+
 def build_article_pdf(title: str, paragraphs: list[str], url: str = "") -> tuple[bytes, int]:
     """Generate a clean, readable A4 PDF from article paragraphs.
     Formats pages into comfortable learning chunks (~180-260 words per page).
     Returns (pdf_bytes, page_count).
+
+    Rendering is driven by measured heights: every textbox draw is checked, and a
+    paragraph that does not fit starts a new page instead of being dropped.
     """
     title = sanitize_cjk_pdf_text(title) or "Article"
-    paragraphs = [sanitize_cjk_pdf_text(p) for p in paragraphs if sanitize_cjk_pdf_text(p)]
+
+    expanded: list[str] = []
+    for raw in paragraphs:
+        cleaned = sanitize_cjk_pdf_text(raw)
+        if cleaned:
+            expanded.extend(_split_oversized_paragraph(cleaned))
+    paragraphs = expanded
+
     doc = pymupdf.open()
     width, height = 595, 842  # Standard A4
     margin_x = 50
@@ -278,33 +405,8 @@ def build_article_pdf(title: str, paragraphs: list[str], url: str = "") -> tuple
     margin_bottom = 35
     max_y = height - margin_bottom - 20
 
-    # Group paragraphs into pages
-    pages_data: list[list[str]] = []
-    current_page: list[str] = []
-    current_words = 0
-
-    for p in paragraphs:
-        w_count = len(p.split())
-        # Break into next page if current page has sufficient content
-        if current_words + w_count > 240 and len(current_page) >= 1:
-            pages_data.append(current_page)
-            current_page = [p]
-            current_words = w_count
-        else:
-            current_page.append(p)
-            current_words += w_count
-
-    if current_page:
-        pages_data.append(current_page)
-    if not pages_data:
-        pages_data = [[title]]
-
-    total_pages = len(pages_data)
-
-    for page_idx, p_list in enumerate(pages_data, 1):
-        page = doc.new_page(width=width, height=height)
-
-        # Header metadata placed at y=10-18 (so DocumentLibrary b[1] < 20 ignores it)
+    def draw_page_header(page, page_idx: int) -> float:
+        """Draw the page chrome and return the starting y for body text."""
         if url:
             domain = urlparse(url).netloc or url
             source_text = f"Source: {domain} | {url[:65]}"
@@ -319,8 +421,6 @@ def build_article_pdf(title: str, paragraphs: list[str], url: str = "") -> tuple
         )
 
         y = margin_top
-
-        # Page Title (supports CJK font when Chinese characters present)
         if page_idx == 1:
             title_font = "china-s" if re.search(r"[\u4e00-\u9fa5]", title) else "helv"
             title_rect = pymupdf.Rect(margin_x, y, width - margin_x, y + 42)
@@ -351,33 +451,82 @@ def build_article_pdf(title: str, paragraphs: list[str], url: str = "") -> tuple
                 width=0.5,
             )
             y += 16
+        return y
 
-        # Paragraphs
-        for p in p_list:
-            est_lines = max(1, len(p) // 75 + 1)
-            p_h = max(24, est_lines * 16 + 12)
-            target_rect = pymupdf.Rect(
-                margin_x, y, width - margin_x, min(max_y, y + p_h + 10)
-            )
-            p_font = "china-s" if re.search(r"[\u4e00-\u9fa5]", p) else "helv"
-            page.insert_textbox(target_rect, p, fontname=p_font, fontsize=11)
-            y += p_h
-            if y > max_y - 25:
+    def draw_footer(page) -> None:
+        page.insert_textbox(
+            pymupdf.Rect(margin_x, height - 18, width - margin_x, height - 5),
+            "English Coach · https://github.com/cherish333/english-coach",
+            fontname="helv",
+            fontsize=7,
+            color=(0.65, 0.65, 0.65),
+        )
+
+    # --- Render pass -----------------------------------------------------
+    # Every insert_textbox() call is checked: a negative return means PyMuPDF
+    # drew *nothing* for that box, which is how article bodies used to vanish.
+    page = doc.new_page(width=width, height=height)
+    page_idx = 1
+    y = draw_page_header(page, page_idx)
+    font_size = 11.0
+    line_height = font_size * 1.45
+
+    def new_page() -> float:
+        nonlocal page, page_idx, y
+        draw_footer(page)
+        page_idx += 1
+        page = doc.new_page(width=width, height=height)
+        y = draw_page_header(page, page_idx)
+        return y
+
+    for paragraph in paragraphs:
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        p_font = "china-s" if re.search(r"[\u4e00-\u9fa5]", paragraph) else "helv"
+
+        if max_y - y < line_height:
+            new_page()
+
+        while True:
+            box = pymupdf.Rect(margin_x, y, width - margin_x, max_y)
+            leftover = page.insert_textbox(box, paragraph, fontname=p_font, fontsize=font_size)
+            if leftover >= 0:
+                # leftover is the unused height in the box, so the text occupied
+                # (box height - leftover); advance past it plus a paragraph gap.
+                used = (max_y - y) - leftover
+                y += used + 10
                 break
 
-        # Running Footer at very bottom (y > height - 20 so DocumentLibrary ignores it)
-        footer_rect = pymupdf.Rect(
-            margin_x, height - 18, width - margin_x, height - 5
-        )
-        page.insert_textbox(
-            footer_rect,
-            f"Page {page_idx} of {total_pages}",
-            fontname="helv",
-            fontsize=8,
-            color=(0.5, 0.5, 0.5),
-            align=pymupdf.TEXT_ALIGN_RIGHT,
-        )
+            # Did not fit from here. If this is not the first attempt on a fresh
+            # page, the paragraph is taller than a whole page even after
+            # splitting: cut it at a word boundary and carry the rest over.
+            if y > margin_top + line_height:
+                new_page()
+                continue
 
+            cut = paragraph.rfind(" ", 0, max(20, len(paragraph) // 2))
+            if cut <= 0:
+                cut = max(1, len(paragraph) // 2)
+            head, paragraph = paragraph[:cut].strip(), paragraph[cut:].strip()
+            head_leftover = page.insert_textbox(
+                pymupdf.Rect(margin_x, y, width - margin_x, max_y),
+                head,
+                fontname=p_font,
+                fontsize=font_size,
+            )
+            if head_leftover < 0:
+                # Even the head does not fit: start a fresh page and retry.
+                new_page()
+                continue
+            y += ((max_y - y) - head_leftover) + 10
+            if not paragraph:
+                break
+            new_page()
+
+    draw_footer(page)
+
+    total_pages = doc.page_count
     pdf_bytes = doc.tobytes()
     doc.close()
     return pdf_bytes, total_pages

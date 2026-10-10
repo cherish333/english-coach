@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import datetime
 import re
@@ -6,11 +7,29 @@ from typing import List, Dict, Optional, Any
 from src.config import PROJECT_ROOT
 
 
-DB_PATH = PROJECT_ROOT / "data" / "coach_notes.db"
+def _resolve_db_path() -> Path:
+    """Resolve the notes database path on every call.
+
+    Honouring COACH_DB_PATH lets tests (and throwaway runs) point at a temp
+    file. Without it the shipped test suite mutated the learner's real
+    data/coach_notes.db — injecting "Test sentence" mistakes and the odometer
+    rows that made words_typed and typed_words_log disagree.
+    """
+    override = os.getenv("COACH_DB_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return PROJECT_ROOT / "data" / "coach_notes.db"
+
+
+# Kept for backwards compatibility with callers that read the constant; the
+# live path is always re-resolved inside get_db_connection().
+DB_PATH = _resolve_db_path()
+
 
 def get_db_connection():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=15.0)
+    db_path = _resolve_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), timeout=15.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 10000;")
     return conn

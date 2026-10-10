@@ -49,3 +49,6 @@ data/backups/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Front-end DOM test dependencies (tests/js/package.json is committed; modules are not)
+tests/js/node_modules/
